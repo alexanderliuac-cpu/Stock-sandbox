@@ -3,12 +3,12 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from prophet import Prophet
-from prophet.plot import plot_plotly  # 補回這行關鍵指令！
+from prophet.plot import plot_plotly
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="AI 美股預測 v5.2", layout="wide")
-st.title("🤖 AI 美股預測 v5.2")
-st.caption("最終修復版：補回 plot_plotly 定義")
+st.set_page_config(page_title="AI 美股預測 v5.3", layout="wide")
+st.title("🤖 AI 美股預測 v5.3")
+st.caption("儀表板單一數值化 & 新增 AI 判讀解釋")
 
 # --- 2. 輸入區 ---
 col_input, col_days = st.columns([2, 1])
@@ -24,10 +24,8 @@ with col_days:
 def get_stock_data(ticker_symbol):
     try:
         stock = yf.Ticker(ticker_symbol)
-        # 優先嘗試自動調整後的價格
         hist = stock.history(period="5y", auto_adjust=True)
         
-        # 備用方案：原始價格
         if hist is None or hist.empty:
             hist = stock.history(period="5y", auto_adjust=False)
         
@@ -35,7 +33,6 @@ def get_stock_data(ticker_symbol):
             return None
 
         hist.reset_index(inplace=True)
-        # 移除時區資訊避免報錯
         if 'Date' in hist.columns:
              hist['Date'] = hist['Date'].dt.tz_localize(None)
         
@@ -45,29 +42,24 @@ def get_stock_data(ticker_symbol):
 
 # --- 4. AI 預測函數 ---
 def predict_stock(data, days):
-    # 準備 Prophet 需要的欄位格式
     df_train = data[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
     
-    # 建立模型 (排除日內週期，增加靈敏度)
     m = Prophet(daily_seasonality=False, changepoint_prior_scale=0.5)
     m.fit(df_train)
     
-    # 建立未來日期 (排除週末 freq='B')
     future = m.make_future_dataframe(periods=days, freq='B')
     forecast = m.predict(future)
     
-    # 負值校正：將小於 0 的預測值強制設為 0
+    # 負值校正
     cols_to_fix = ['yhat', 'yhat_lower', 'yhat_upper']
     forecast[cols_to_fix] = forecast[cols_to_fix].clip(lower=0)
     
     return m, forecast
 
-# --- 5. 儀表板繪圖函數 ---
+# --- 5. 儀表板與解釋函數 (更新重點) ---
 def plot_gauge(current_price, future_price):
-    # 計算預期漲跌幅
     change_pct = ((future_price - current_price) / current_price) * 100
     
-    # 判斷評級顏色
     if change_pct >= 10:
         rating, color = "強烈買進", "#00CC96"
     elif change_pct >= 5:
@@ -79,13 +71,14 @@ def plot_gauge(current_price, future_price):
     else:
         rating, color = "強烈賣出", "#8c1515"
 
+    # 【優化】mode 改為 "gauge+number"，移除重複的 delta
     fig = go.Figure(go.Indicator(
-        mode = "gauge+number+delta",
+        mode = "gauge+number",
         value = change_pct,
         domain = {'x': [0, 1], 'y': [0, 1]},
         title = {'text': f"AI 建議: {rating}", 'font': {'size': 20}},
-        delta = {'reference': 0, 'position': "top", 'valueformat': ".1f", 'suffix': "%"},
-        number = {'suffix': "%", 'font': {'color': color}},
+        # 設定數值格式，強制顯示正負號 (+.1f)
+        number = {'suffix': "%", 'font': {'color': color}, 'valueformat': "+.1f"},
         gauge = {
             'axis': {'range': [-30, 30], 'tickwidth': 1},
             'bar': {'color': "white", 'thickness': 0.2},
@@ -110,7 +103,20 @@ def plot_gauge(current_price, future_price):
         paper_bgcolor="#0E1117", 
         font={'color': "white"}
     )
-    return fig
+    return fig, change_pct
+
+def get_ai_explanation(ticker, days, change_pct):
+    """生成 AI 判讀文字"""
+    if change_pct >= 10:
+        return f"🚀 **強烈看漲理由**：模型預測 {ticker} 在未來 {days} 天擁有強勁上漲動能 (>10%)。歷史趨勢顯示多頭排列穩固，建議積極佈局。"
+    elif change_pct >= 5:
+        return f"📈 **看漲理由**：預測 {ticker} 呈現溫和上升趨勢。雖然不如爆發性增長，但預期回報為正 ({change_pct:.1f}%)，適合分批買入。"
+    elif change_pct > -5:
+        return f"⚖️ **持守理由**：模型顯示 {ticker} 短期內缺乏明確方向，預期將在區間內震盪。風險與報酬相對平衡，建議暫時觀望。"
+    elif change_pct > -10:
+        return f"📉 **看跌理由**：動能轉弱，預測未來 {days} 天面臨回調壓力。除非有重大利多，否則價格可能緩步走低，建議減碼。"
+    else:
+        return f"⚠️ **強烈看跌理由**：模型偵測到顯著的下行風險，預期跌幅可能超過 10%。技術面呈現疲軟，建議避開或設定嚴格停損。"
 
 # --- 6. 主程式執行區 ---
 if ticker_input:
@@ -122,7 +128,7 @@ if ticker_input:
         if hist is None or hist.empty:
             st.error(f"❌ 找不到代碼 '{ticker_symbol}'")
         else:
-            # (A) 顯示目前價格卡片
+            # (A) 顯示目前價格
             current_price = hist['Close'].iloc[-1]
             prev_price = hist['Close'].iloc[-2]
             delta = current_price - prev_price
@@ -138,18 +144,20 @@ if ticker_input:
             """, unsafe_allow_html=True)
 
             try:
-                # 執行 AI 預測
+                # AI 預測
                 m, forecast = predict_stock(hist, forecast_days)
                 future_price = forecast['yhat'].iloc[-1]
 
-                # (B) 顯示儀表板
+                # (B) 顯示儀表板 (單一數值)
                 st.subheader("🧭 AI 建議光譜")
-                gauge_chart = plot_gauge(current_price, future_price)
+                gauge_chart, change_pct = plot_gauge(current_price, future_price)
                 st.plotly_chart(gauge_chart, use_container_width=True)
                 
-                st.info(f"💡 預測 {forecast_days} 個交易日後目標價：**${future_price:.2f}**")
+                # (C) 【新功能】AI 判讀文字
+                explanation = get_ai_explanation(ticker_symbol, forecast_days, change_pct)
+                st.info(explanation)
 
-                # (C) 顯示走勢圖 (現在這裡不會報錯了)
+                # (D) 走勢圖
                 st.subheader("📈 詳細走勢預測")
                 fig = plot_plotly(m, forecast)
                 fig.update_layout(
@@ -159,7 +167,7 @@ if ticker_input:
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # (D) 顯示未來 10 天數據
+                # (E) 未來 10 天數據
                 st.subheader("📅 未來 10 天預測表")
                 last_date = hist['Date'].iloc[-1]
                 future_only = forecast[forecast['ds'] > last_date]
