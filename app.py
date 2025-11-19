@@ -3,11 +3,12 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from prophet import Prophet
+from prophet.plot import plot_plotly  # 補回這行關鍵指令！
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="AI 美股預測 v5.1", layout="wide")
-st.title("🤖 AI 美股預測 v5.1")
-st.caption("修復語法錯誤版：含買賣建議儀表板 & 負值校正")
+st.set_page_config(page_title="AI 美股預測 v5.2", layout="wide")
+st.title("🤖 AI 美股預測 v5.2")
+st.caption("最終修復版：補回 plot_plotly 定義")
 
 # --- 2. 輸入區 ---
 col_input, col_days = st.columns([2, 1])
@@ -141,14 +142,14 @@ if ticker_input:
                 m, forecast = predict_stock(hist, forecast_days)
                 future_price = forecast['yhat'].iloc[-1]
 
-                # (B) 顯示儀表板 (確認這裡的括號完整)
+                # (B) 顯示儀表板
                 st.subheader("🧭 AI 建議光譜")
                 gauge_chart = plot_gauge(current_price, future_price)
                 st.plotly_chart(gauge_chart, use_container_width=True)
                 
                 st.info(f"💡 預測 {forecast_days} 個交易日後目標價：**${future_price:.2f}**")
 
-                # (C) 顯示走勢圖
+                # (C) 顯示走勢圖 (現在這裡不會報錯了)
                 st.subheader("📈 詳細走勢預測")
                 fig = plot_plotly(m, forecast)
                 fig.update_layout(
