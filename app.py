@@ -84,7 +84,7 @@ if ticker_input:
                 
                 # 3. 數值表
                 st.subheader("📅 預測數值表 (未來 5 天)")
-                future_data = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(5)
+                future_data = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].head(5)
                 future_data.columns = ['日期', '預測價格', '預測下限', '預測上限']
                 st.dataframe(future_data.style.format({"預測價格": "{:.2f}", "預測下限": "{:.2f}", "預測上限": "{:.2f}"}))
                 
