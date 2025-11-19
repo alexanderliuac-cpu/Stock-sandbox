@@ -5,44 +5,40 @@ import plotly.graph_objects as go
 from prophet import Prophet
 from prophet.plot import plot_plotly
 
-# --- 頁面設定 (手機版優化) ---
+# --- 頁面設定 ---
 st.set_page_config(page_title="AI 美股預測", layout="wide")
 
 # --- 標題區 ---
 st.title("🤖 AI 美股預測")
-st.caption("輸入代碼 (如 NVDA, TSLA, AAPL) 查看即時走勢與 AI 預測")
+st.caption("排除週末交易日修正版 (Business Days Only)")
 
-# --- 輸入區 (搬到主畫面，方便手機輸入) ---
+# --- 輸入區 ---
 col_input, col_days = st.columns([2, 1])
 
 with col_input:
-    # 這裡就是您要的輸入欄位，預設 NVDA
     ticker_input = st.text_input("請輸入美股代碼", value="NVDA")
 
 with col_days:
-    # 預測天數設定
-    forecast_days = st.selectbox("預測天數", [30, 60, 90, 180, 365], index=2)
+    forecast_days = st.selectbox("預測範圍", [30, 60, 90, 180], index=1)
 
-# --- 資料獲取函數 (增強版：雙重保險) ---
+# --- 資料獲取函數 ---
 @st.cache_data
 def get_stock_data(ticker_symbol):
     try:
         stock = yf.Ticker(ticker_symbol)
         
-        # 嘗試 1: 抓取自動調整後的股價 (解決分割問題)
+        # 嘗試 1: 抓取自動調整後的股價
         hist = stock.history(period="5y", auto_adjust=True)
         
-        # 如果抓不到 (例如新上市股票或 API 異常)，嘗試 2: 抓原始股價
+        # 嘗試 2: 抓原始股價
         if hist is None or hist.empty:
             hist = stock.history(period="5y", auto_adjust=False)
         
-        # 如果還是空的，那就是真的代碼錯了
         if hist is None or hist.empty:
             return None
 
         hist.reset_index(inplace=True)
         
-        # 處理時區問題
         if 'Date' in hist.columns:
              hist['Date'] = hist['Date'].dt.tz_localize(None)
         
@@ -58,29 +54,27 @@ def predict_stock(data, days):
     m = Prophet(daily_seasonality=False, changepoint_prior_scale=0.5)
     m.fit(df_train)
     
-    future = m.make_future_dataframe(periods=days)
+    # 【修正重點】freq='B' 代表 Business Day (只算工作日，排除週末)
+    future = m.make_future_dataframe(periods=days, freq='B')
+    
     forecast = m.predict(future)
     return m, forecast
 
 # --- 主程式邏輯 ---
 if ticker_input:
-    ticker_symbol = ticker_input.upper().strip() # 去除前後空白
+    ticker_symbol = ticker_input.upper().strip()
     
-    # 顯示讀取動畫
-    with st.spinner(f'正在分析 {ticker_symbol} 的數據...'):
+    with st.spinner(f'正在分析 {ticker_symbol} (排除週末中)...'):
         hist = get_stock_data(ticker_symbol)
 
         if hist is None or hist.empty:
             st.error(f"❌ 找不到代碼 '{ticker_symbol}'。")
-            st.info("💡 提示：美股代碼通常是英文縮寫，例如台積電請輸入 TSM。")
         else:
-            # 1. 顯示即時資訊 (卡片式設計)
+            # 1. 即時資訊卡片
             current_price = hist['Close'].iloc[-1]
             prev_price = hist['Close'].iloc[-2]
             delta = current_price - prev_price
             delta_percent = (delta / prev_price) * 100
-            
-            # 根據漲跌變色 (美股：綠漲紅跌)
             color = "green" if delta >= 0 else "red"
             
             st.markdown(f"""
@@ -92,7 +86,7 @@ if ticker_input:
             """, unsafe_allow_html=True)
 
             # 2. AI 預測圖表
-            st.subheader(f"📈 趨勢預測 ({forecast_days}天)")
+            st.subheader(f"📈 趨勢預測 ({forecast_days}個交易日)")
             
             try:
                 m, forecast = predict_stock(hist, forecast_days)
@@ -101,24 +95,30 @@ if ticker_input:
                     xaxis_title=None,
                     yaxis_title="股價 (USD)",
                     hovermode="x",
-                    height=500, # 手機版高度稍微調小一點
-                    margin=dict(l=20, r=20, t=40, b=20) # 調整邊界
+                    height=500,
+                    margin=dict(l=20, r=20, t=40, b=20)
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # 3. 未來價格表
-                st.subheader("📅 未來 5 天預測")
+                # 3. 未來 10 天預測表 (擴充顯示)
+                st.subheader("📅 未來 10 個交易日預測") # 標題更新
+                
                 last_hist_date = hist['Date'].iloc[-1]
                 future_only = forecast[forecast['ds'] > last_hist_date]
-                future_data = future_only[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].head(5)
                 
-                future_data.columns = ['日期', '預測價', '下限', '上限']
-                future_data['日期'] = future_data['日期'].dt.strftime('%m-%d') # 手機版日期簡化為 月-日
+                # 【修正重點】改為 head(10) 顯示十筆資料
+                future_data = future_only[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].head(10)
                 
-                # 顯示表格
+                future_data.columns = ['日期 (週一至週五)', '預測價', '下限', '上限']
+                
+                # 加上星期幾的顯示，方便您確認有沒有週末 (0=週一, 4=週五)
+                # future_data['星期'] = future_data['日期 (週一至週五)'].dt.day_name()
+                future_data['日期 (週一至週五)'] = future_data['日期 (週一至週五)'].dt.strftime('%m-%d (%a)')
+                
                 st.dataframe(
                     future_data.style.format({"預測價": "{:.1f}", "下限": "{:.1f}", "上限": "{:.1f}"}),
-                    use_container_width=True
+                    use_container_width=True,
+                    height=400 # 稍微拉高表格高度
                 )
                 
             except Exception as e:
