@@ -15,20 +15,18 @@ st.sidebar.header("設定參數")
 ticker_input = st.sidebar.text_input("輸入美股代碼", value="NVDA")
 forecast_days = st.sidebar.slider("AI 預測天數", min_value=30, max_value=365, value=90)
 
-# --- 資料獲取函數 (絕對修正版) ---
+# --- 資料獲取函數 ---
 @st.cache_data
 def get_stock_data(ticker_symbol):
     try:
         stock = yf.Ticker(ticker_symbol)
-        # 只抓取歷史數據
-        hist = stock.history(period="5y")
+        # 【修正 1】強制開啟 auto_adjust=True，解決股票分割 (Split) 造成的數據斷層
+        hist = stock.history(period="5y", auto_adjust=True)
         hist.reset_index(inplace=True)
         
-        # 處理時區問題
         if 'Date' in hist.columns:
              hist['Date'] = hist['Date'].dt.tz_localize(None)
         
-        # 【關鍵修正】只回傳 hist (數據表)，不要回傳 stock
         return hist
     except Exception as e:
         return None
@@ -36,7 +34,12 @@ def get_stock_data(ticker_symbol):
 # --- AI 預測函數 ---
 def predict_stock(data, days):
     df_train = data[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
-    m = Prophet(daily_seasonality=True)
+    
+    # 【修正 2】調整模型參數
+    # daily_seasonality=False: 因為我們只有日線，不需要分析「日內」變化
+    # changepoint_prior_scale=0.5: 增加 AI 對「近期趨勢改變」的敏感度 (預設是 0.05，對飆股來說反應太慢)
+    m = Prophet(daily_seasonality=False, changepoint_prior_scale=0.5)
+    
     m.fit(df_train)
     future = m.make_future_dataframe(periods=days)
     forecast = m.predict(future)
@@ -47,7 +50,6 @@ if ticker_input:
     ticker_symbol = ticker_input.upper()
     
     with st.spinner('正在下載數據並進行 AI 運算...'):
-        # 【關鍵修正】這裡變成只接收一個變數 hist
         hist = get_stock_data(ticker_symbol)
 
         if hist is None or hist.empty:
@@ -82,11 +84,20 @@ if ticker_input:
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # 3. 數值表
-                st.subheader("📅 預測數值表 (未來 5 天)")
-                future_data = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].head(5)
+                # 3. 預測數值表 (修正日期邏輯)
+                st.subheader("📅 未來 5 天價格預測 (Next 5 Days)")
+                
+                last_hist_date = hist['Date'].iloc[-1]
+                future_only = forecast[forecast['ds'] > last_hist_date]
+                future_data = future_only[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].head(5)
+                
                 future_data.columns = ['日期', '預測價格', '預測下限', '預測上限']
+                future_data['日期'] = future_data['日期'].dt.strftime('%Y-%m-%d')
+                
                 st.dataframe(future_data.style.format({"預測價格": "{:.2f}", "預測下限": "{:.2f}", "預測上限": "{:.2f}"}))
                 
             except Exception as e:
                 st.error(f"預測模型運算錯誤: {e}")
+                st.info("若預測數值異常，可能是該股票近期波動過大，AI 模型尚未收斂。")
+
+            st.warning("⚠️ 免責聲明：此模型僅基於歷史數據進行數學統計推算，無法預測突發新聞。")
