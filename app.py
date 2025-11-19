@@ -10,13 +10,13 @@ st.set_page_config(page_title="AI 美股預測", layout="wide")
 
 # --- 標題區 ---
 st.title("🤖 AI 美股預測")
-st.caption("排除週末交易日修正版 (Business Days Only)")
+st.caption("v4.0: 負值校正 (No Negative Price) & 排除週末")
 
 # --- 輸入區 ---
 col_input, col_days = st.columns([2, 1])
 
 with col_input:
-    ticker_input = st.text_input("請輸入美股代碼", value="NVDA")
+    ticker_input = st.text_input("請輸入美股代碼", value="NVAX")
 
 with col_days:
     forecast_days = st.selectbox("預測範圍", [30, 60, 90, 180], index=1)
@@ -54,17 +54,22 @@ def predict_stock(data, days):
     m = Prophet(daily_seasonality=False, changepoint_prior_scale=0.5)
     m.fit(df_train)
     
-    # 【修正重點】freq='B' 代表 Business Day (只算工作日，排除週末)
+    # 設定未來預測僅含工作日 (Business Day)
     future = m.make_future_dataframe(periods=days, freq='B')
     
     forecast = m.predict(future)
+    
+    # 【v4.0 關鍵修正】: 將所有預測價格 (yhat) 與區間 (lower/upper) 強制鎖在 0 以上
+    cols_to_fix = ['yhat', 'yhat_lower', 'yhat_upper']
+    forecast[cols_to_fix] = forecast[cols_to_fix].clip(lower=0)
+    
     return m, forecast
 
 # --- 主程式邏輯 ---
 if ticker_input:
     ticker_symbol = ticker_input.upper().strip()
     
-    with st.spinner(f'正在分析 {ticker_symbol} (排除週末中)...'):
+    with st.spinner(f'正在分析 {ticker_symbol}...'):
         hist = get_stock_data(ticker_symbol)
 
         if hist is None or hist.empty:
@@ -100,25 +105,21 @@ if ticker_input:
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # 3. 未來 10 天預測表 (擴充顯示)
-                st.subheader("📅 未來 10 個交易日預測") # 標題更新
+                # 3. 未來 10 天預測表
+                st.subheader("📅 未來 10 個交易日預測")
                 
                 last_hist_date = hist['Date'].iloc[-1]
                 future_only = forecast[forecast['ds'] > last_hist_date]
                 
-                # 【修正重點】改為 head(10) 顯示十筆資料
                 future_data = future_only[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].head(10)
                 
                 future_data.columns = ['日期 (週一至週五)', '預測價', '下限', '上限']
-                
-                # 加上星期幾的顯示，方便您確認有沒有週末 (0=週一, 4=週五)
-                # future_data['星期'] = future_data['日期 (週一至週五)'].dt.day_name()
                 future_data['日期 (週一至週五)'] = future_data['日期 (週一至週五)'].dt.strftime('%m-%d (%a)')
                 
                 st.dataframe(
-                    future_data.style.format({"預測價": "{:.1f}", "下限": "{:.1f}", "上限": "{:.1f}"}),
+                    future_data.style.format({"預測價": "{:.2f}", "下限": "{:.2f}", "上限": "{:.2f}"}),
                     use_container_width=True,
-                    height=400 # 稍微拉高表格高度
+                    height=400
                 )
                 
             except Exception as e:
