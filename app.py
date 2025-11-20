@@ -8,9 +8,9 @@ import numpy as np
 from datetime import datetime
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="AI 股市戰情室 v11.0", layout="wide")
-st.title("🤖 AI 股市戰情室 v11.0")
-st.caption("戰情室版：新增當日分時走勢圖 (Intraday 5-min Chart)")
+st.set_page_config(page_title="AI 股市戰情室 v11.1", layout="wide")
+st.title("🤖 AI 股市戰情室 v11.1")
+st.caption("視覺修復版：整合式報價卡 (Unified Quote Card) + 獨立走勢圖")
 
 # --- 2. 輸入與設定區 ---
 st.markdown("### 1️⃣ 選擇市場")
@@ -41,20 +41,17 @@ with col_input:
 with col_days:
     forecast_days = st.selectbox("預測天數", [30, 60, 90, 180], index=1)
 
-# --- 3. 資料獲取函數 (長線 + 當日) ---
+# --- 3. 資料獲取函數 ---
 @st.cache_data
 def get_stock_data(ticker, market):
     try:
-        # 1. 處理代碼後綴
         if market == "🇹🇼 台股 (TW)":
             if not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
                 test_ticker = f"{ticker}.TW"
             else:
                 test_ticker = ticker
-            # 先測上市
             stock = yf.Ticker(test_ticker)
             hist = stock.history(period="5y", auto_adjust=True)
-            # 失敗測上櫃
             if hist is None or hist.empty:
                 test_ticker = f"{ticker}.TWO"
                 stock = yf.Ticker(test_ticker)
@@ -63,25 +60,20 @@ def get_stock_data(ticker, market):
             stock = yf.Ticker(ticker)
             hist = stock.history(period="5y", auto_adjust=True)
 
-        # 容錯：抓不到自動調整就抓原始
         if hist is None or hist.empty:
             hist = stock.history(period="5y", auto_adjust=False)
         
         if hist is None or hist.empty:
             return None, None, None, None
 
-        # 處理長線資料格式
         hist.reset_index(inplace=True)
         if 'Date' in hist.columns:
              hist['Date'] = hist['Date'].dt.tz_localize(None)
         
-        # 2. 抓取「當日」分鐘級資料 (用於畫今日線圖)
-        # 注意：假日抓不到資料是正常的，這裡不做強求
         try:
             intraday = stock.history(period="1d", interval="5m", auto_adjust=True)
             if intraday is not None and not intraday.empty:
                 intraday.reset_index(inplace=True)
-                # 統一時區處理
                 if 'Datetime' in intraday.columns:
                     intraday['Datetime'] = intraday['Datetime'].dt.tz_localize(None)
             else:
@@ -103,7 +95,6 @@ def predict_stock(data, days):
     m.fit(df_train)
     future = m.make_future_dataframe(periods=days, freq='B')
     forecast = m.predict(future)
-    
     cols_to_fix = ['yhat', 'yhat_lower', 'yhat_upper']
     forecast[cols_to_fix] = forecast[cols_to_fix].clip(lower=0)
     return m, forecast
@@ -113,19 +104,17 @@ def backtest_model(data, test_days=5):
     df_full = data[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
     train_df = df_full.iloc[:-test_days]
     test_df = df_full.iloc[-test_days:].copy()
-    
     m = Prophet(daily_seasonality=False, changepoint_prior_scale=0.5)
     m.fit(train_df)
     future = m.make_future_dataframe(periods=test_days, freq='B')
     forecast = m.predict(future)
-    
     forecast_tail = forecast.tail(test_days)[['ds', 'yhat']]
     result = pd.merge(test_df, forecast_tail, on='ds', how='inner')
     result['error_pct'] = ((result['y'] - result['yhat']).abs() / result['y']) * 100
     acc_score = 100 - result['error_pct'].mean()
     return acc_score, result
 
-# --- 6. 繪圖輔助函數 ---
+# --- 6. 繪圖與格式化函數 ---
 def plot_gauge(current, future, c_symbol):
     raw_change_pct = ((future - current) / current) * 100
     change_pct = round(raw_change_pct, 3)
@@ -137,19 +126,14 @@ def plot_gauge(current, future, c_symbol):
     else: rating, color = "強烈賣出", "#8c1515"
 
     fig = go.Figure(go.Indicator(
-        mode = "gauge+number", 
-        value = change_pct,
+        mode = "gauge+number", value = change_pct,
         title = {'text': f"AI 建議: {rating}", 'font': {'size': 20}},
         number = {'suffix': "%", 'font': {'color': color}, 'valueformat': "+.3f"},
         gauge = {
-            'axis': {'range': [-30, 30]}, 
-            'bar': {'color': "white"}, 
-            'bgcolor': "black",
+            'axis': {'range': [-30, 30]}, 'bar': {'color': "white"}, 'bgcolor': "black",
             'steps': [
-                {'range': [-30, -10], 'color': '#8c1515'},
-                {'range': [-10, -5], 'color': '#d62728'},
-                {'range': [-5, 5], 'color': '#ffbf00'},
-                {'range': [5, 10], 'color': '#2ca02c'},
+                {'range': [-30, -10], 'color': '#8c1515'}, {'range': [-10, -5], 'color': '#d62728'},
+                {'range': [-5, 5], 'color': '#ffbf00'}, {'range': [5, 10], 'color': '#2ca02c'},
                 {'range': [10, 30], 'color': '#00CC96'}
             ],
             'threshold': {'line': {'color': "white", 'width': 4}, 'thickness': 0.75, 'value': change_pct}
@@ -159,29 +143,24 @@ def plot_gauge(current, future, c_symbol):
     return fig, change_pct
 
 def plot_intraday(intraday_data, symbol, currency_symbol):
-    """繪製當日分鐘級走勢圖"""
     fig = go.Figure()
-    
-    # 使用 K 線圖 (Candlestick)
     fig.add_trace(go.Candlestick(
         x=intraday_data['Datetime'],
-        open=intraday_data['Open'],
-        high=intraday_data['High'],
-        low=intraday_data['Low'],
-        close=intraday_data['Close'],
+        open=intraday_data['Open'], high=intraday_data['High'],
+        low=intraday_data['Low'], close=intraday_data['Close'],
         name="Price"
     ))
-    
-    # 移除底部 Range Slider 以節省空間，並優化版面
+    # 優化圖表背景與邊距，使其看起來更簡潔
     fig.update_layout(
-        title=dict(text=f"📊 {symbol} 今日走勢 (5分K)", font=dict(size=14, color="#ccc")),
+        title=dict(text=f"📉 當日走勢 (5分K)", font=dict(size=14, color="#ccc")),
         xaxis_rangeslider_visible=False,
-        height=350, # 稍微矮一點，適合嵌入
-        margin=dict(l=10, r=10, t=30, b=20),
-        paper_bgcolor="#1e212b", # 配合報價區背景色
-        plot_bgcolor="#1e212b",
-        xaxis=dict(showgrid=False, color="#888"),
-        yaxis=dict(showgrid=True, gridcolor="#333", color="#888", title=currency_symbol)
+        height=300,
+        margin=dict(l=10, r=10, t=40, b=20),
+        paper_bgcolor="#0E1117", # 深色背景
+        plot_bgcolor="#0E1117",
+        font=dict(color="#aaa"),
+        xaxis=dict(showgrid=False),
+        yaxis=dict(showgrid=True, gridcolor="#333", title=currency_symbol)
     )
     return fig
 
@@ -206,59 +185,65 @@ def format_large_number(num, c_symbol):
 if ticker_input:
     ticker_clean = ticker_input.upper().strip()
     
-    with st.spinner(f'AI 正在搜尋 {market_mode} 數據 (含當日分時)...'):
-        # 【接收四個值】新增 intraday
+    with st.spinner(f'AI 正在搜尋 {market_mode} 數據...'):
         hist, info, real_symbol, intraday = get_stock_data(ticker_clean, market_mode)
 
         if hist is None or hist.empty:
             st.error(f"❌ 找不到代碼 '{ticker_clean}'")
-            if market_mode == "🇹🇼 台股 (TW)":
-                st.info("💡 提示：台股請輸入數字代碼，如 2330 (台積電), 2603 (長榮)。")
         else:
-            # (A) 即時報價看板
+            # (A) 整合式即時報價卡 (Unified Quote Card)
+            # 這是解決視覺斷裂的關鍵：用一個大的 HTML div 包住所有文字資訊
             last_row = hist.iloc[-1]
             current_price = last_row['Close']
             prev_price = hist.iloc[-2]['Close']
             delta = current_price - prev_price
             pct = (delta / prev_price) * 100
-            color = "green" if delta >= 0 else "red"
+            color = "#00CC96" if delta >= 0 else "#FF4B4B" # Streamlit 風格綠/紅
             
             day_open = last_row['Open']
             day_high = last_row['High']
             day_low = last_row['Low']
             day_vol = last_row['Volume']
             
-            # 1. 價格大字
+            # 使用 CSS Grid 來排列下方的四個數據，保證對齊且不跑版
             st.markdown(f"""
-            <div style="padding: 20px; border-radius: 15px 15px 0 0; background: #1e212b; border: 1px solid #444; border-bottom: none;">
-                <div style="display: flex; justify-content: space-between; align_items: center;">
+            <div style="background-color: #1e212b; border-radius: 15px; padding: 20px; border: 1px solid #444; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
+                <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 15px;">
                     <div>
-                        <h3 style="margin:0; color: #ccc;">{real_symbol}</h3>
-                        <h1 style="margin:0; font-size: 3em; color: {color};">{currency_symbol}{current_price:.2f}</h1>
-                        <span style="font-size: 1.2em; color: {color}; font-weight: bold;">{delta:+.2f} ({pct:+.2f}%)</span>
+                        <h3 style="margin:0; color: #ccc; font-size: 1.2em;">{real_symbol}</h3>
+                        <div style="display: flex; align-items: baseline; gap: 10px;">
+                            <h1 style="margin:0; font-size: 2.8em; color: {color};">{currency_symbol}{current_price:.2f}</h1>
+                            <span style="font-size: 1.2em; color: {color}; font-weight: bold;">{delta:+.2f} ({pct:+.2f}%)</span>
+                        </div>
+                    </div>
+                </div>
+                <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; border-top: 1px solid #444; padding-top: 15px;">
+                    <div style="text-align: center;">
+                        <div style="color: #888; font-size: 0.8em;">開盤</div>
+                        <div style="font-weight: bold; color: #eee;">{day_open:.2f}</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="color: #888; font-size: 0.8em;">最高</div>
+                        <div style="font-weight: bold; color: #eee;">{day_high:.2f}</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="color: #888; font-size: 0.8em;">最低</div>
+                        <div style="font-weight: bold; color: #eee;">{day_low:.2f}</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="color: #888; font-size: 0.8em;">量</div>
+                        <div style="font-weight: bold; color: #eee;">{format_large_number(day_vol, currency_symbol)}</div>
                     </div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
-            
-            # 2. 詳細數據條
-            st.markdown("""<div style="background: #1e212b; padding: 10px; border: 1px solid #444; border-top: none;">""", unsafe_allow_html=True)
-            q1, q2, q3, q4 = st.columns(4)
-            q1.metric("開盤", f"{day_open:.2f}")
-            q2.metric("最高", f"{day_high:.2f}")
-            q3.metric("最低", f"{day_low:.2f}")
-            q4.metric("量", format_large_number(day_vol, currency_symbol))
-            st.markdown("</div>", unsafe_allow_html=True)
-            
-            # 3. 【新功能】今日分時走勢圖 (嵌入在報價區下方)
+
+            # (A-2) 當日走勢圖 (獨立顯示，不再嘗試包進 div)
             if intraday is not None and not intraday.empty:
-                st.markdown("""<div style="background: #1e212b; border: 1px solid #444; border-top: none; border-radius: 0 0 15px 15px; padding: 10px;">""", unsafe_allow_html=True)
                 intraday_chart = plot_intraday(intraday, real_symbol, currency_symbol)
                 st.plotly_chart(intraday_chart, use_container_width=True)
-                st.markdown("</div>", unsafe_allow_html=True)
             else:
-                # 如果是假日或還沒開盤，顯示提示
-                st.info("💤 目前無即時分時數據 (可能為休市或盤前)")
+                st.caption("💤 目前無即時分時數據 (可能為盤前或休市)")
 
             st.divider()
 
