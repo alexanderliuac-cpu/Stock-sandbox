@@ -8,9 +8,9 @@ import numpy as np
 from datetime import datetime
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="AI 股市戰情室 v12.0", layout="wide")
-st.title("🤖 AI 股市戰情室 v12.0")
-st.caption("終極版：全能個股資訊卡 (Price + Fundamentals Unified Card)")
+st.set_page_config(page_title="AI 股市戰情室 v12.1", layout="wide")
+st.title("🤖 AI 股市戰情室 v12.1")
+st.caption("修復版：解決資訊卡顯示為原始碼的問題")
 
 # --- 2. 輸入與設定區 ---
 st.markdown("### 1️⃣ 選擇市場")
@@ -190,7 +190,6 @@ if ticker_input:
                 st.info("💡 提示：台股請輸入數字代碼，如 2330 (台積電), 2603 (長榮)。")
         else:
             # (A) 全能資訊卡 (Unified Info Card)
-            # 準備數據
             last_row = hist.iloc[-1]
             current_price = last_row['Close']
             prev_price = hist.iloc[-2]['Close']
@@ -198,55 +197,46 @@ if ticker_input:
             pct = (delta / prev_price) * 100
             color = "#00CC96" if delta >= 0 else "#FF4B4B"
             
-            # 交易數據
             day_open = last_row['Open']
             day_high = last_row['High']
             day_low = last_row['Low']
             day_vol = format_large_number(last_row['Volume'], currency_symbol)
             
-            # 基本面數據
             mkt_cap = format_large_number(info.get('marketCap'), currency_symbol)
             pe_ratio = f"{info.get('trailingPE', 'N/A')}"
             eps = f"{info.get('trailingEps', 'N/A')}"
             high_52 = f"{info.get('fiftyTwoWeekHigh', 'N/A')}"
 
-            # HTML 結構：三層式設計
-            # 1. 標題層 (大股價)
-            # 2. 交易層 (開高低量)
-            # 3. 基本面層 (市值/PE/EPS) -> 用 border-top 隔開
-            st.markdown(f"""
-            <div style="background-color: #1e212b; border-radius: 15px; padding: 20px; border: 1px solid #444; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
-                
-                <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 15px;">
-                    <div>
-                        <h3 style="margin:0; color: #ccc; font-size: 1.2em;">{real_symbol}</h3>
-                        <div style="display: flex; align-items: baseline; gap: 10px;">
-                            <h1 style="margin:0; font-size: 2.8em; color: {color};">{currency_symbol}{current_price:.2f}</h1>
-                            <span style="font-size: 1.2em; color: {color}; font-weight: bold;">{delta:+.2f} ({pct:+.2f}%)</span>
-                        </div>
-                    </div>
-                </div>
-
-                <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding-bottom: 15px;">
-                    <div style="text-align: center;"><div style="color: #888; font-size: 0.8em;">開盤</div><div style="font-weight: bold; color: #eee;">{day_open:.2f}</div></div>
-                    <div style="text-align: center;"><div style="color: #888; font-size: 0.8em;">最高</div><div style="font-weight: bold; color: #eee;">{day_high:.2f}</div></div>
-                    <div style="text-align: center;"><div style="color: #888; font-size: 0.8em;">最低</div><div style="font-weight: bold; color: #eee;">{day_low:.2f}</div></div>
-                    <div style="text-align: center;"><div style="color: #888; font-size: 0.8em;">量</div><div style="font-weight: bold; color: #eee;">{day_vol}</div></div>
-                </div>
-
-                <div style="border-top: 1px dashed #444; margin: 0 0 15px 0;"></div>
-
-                <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;">
-                    <div style="text-align: center;"><div style="color: #aaa; font-size: 0.8em;">市值</div><div style="color: #ddd;">{mkt_cap}</div></div>
-                    <div style="text-align: center;"><div style="color: #aaa; font-size: 0.8em;">本益比</div><div style="color: #ddd;">{pe_ratio}</div></div>
-                    <div style="text-align: center;"><div style="color: #aaa; font-size: 0.8em;">EPS</div><div style="color: #ddd;">{eps}</div></div>
-                    <div style="text-align: center;"><div style="color: #aaa; font-size: 0.8em;">52週高</div><div style="color: #ddd;">{high_52}</div></div>
-                </div>
-
+            # 【修復重點】移除 HTML 字串的所有前方縮排，避免被判定為程式碼區塊
+            card_html = f"""
+<div style="background-color: #1e212b; border-radius: 15px; padding: 20px; border: 1px solid #444; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
+    <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 15px;">
+        <div>
+            <h3 style="margin:0; color: #ccc; font-size: 1.2em;">{real_symbol}</h3>
+            <div style="display: flex; align-items: baseline; gap: 10px;">
+                <h1 style="margin:0; font-size: 2.8em; color: {color};">{currency_symbol}{current_price:.2f}</h1>
+                <span style="font-size: 1.2em; color: {color}; font-weight: bold;">{delta:+.2f} ({pct:+.2f}%)</span>
             </div>
-            """, unsafe_allow_html=True)
+        </div>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding-bottom: 15px;">
+        <div style="text-align: center;"><div style="color: #888; font-size: 0.8em;">開盤</div><div style="font-weight: bold; color: #eee;">{day_open:.2f}</div></div>
+        <div style="text-align: center;"><div style="color: #888; font-size: 0.8em;">最高</div><div style="font-weight: bold; color: #eee;">{day_high:.2f}</div></div>
+        <div style="text-align: center;"><div style="color: #888; font-size: 0.8em;">最低</div><div style="font-weight: bold; color: #eee;">{day_low:.2f}</div></div>
+        <div style="text-align: center;"><div style="color: #888; font-size: 0.8em;">量</div><div style="font-weight: bold; color: #eee;">{day_vol}</div></div>
+    </div>
+    <div style="border-top: 1px dashed #444; margin: 0 0 15px 0;"></div>
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;">
+        <div style="text-align: center;"><div style="color: #aaa; font-size: 0.8em;">市值</div><div style="color: #ddd;">{mkt_cap}</div></div>
+        <div style="text-align: center;"><div style="color: #aaa; font-size: 0.8em;">本益比</div><div style="color: #ddd;">{pe_ratio}</div></div>
+        <div style="text-align: center;"><div style="color: #aaa; font-size: 0.8em;">EPS</div><div style="color: #ddd;">{eps}</div></div>
+        <div style="text-align: center;"><div style="color: #aaa; font-size: 0.8em;">52週高</div><div style="color: #ddd;">{high_52}</div></div>
+    </div>
+</div>
+"""
+            st.markdown(card_html, unsafe_allow_html=True)
 
-            # (B) 走勢圖 (接在全能卡片下方)
+            # (B) 走勢圖
             if intraday is not None and not intraday.empty:
                 intraday_chart = plot_intraday(intraday, real_symbol, currency_symbol)
                 st.plotly_chart(intraday_chart, use_container_width=True)
