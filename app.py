@@ -8,9 +8,9 @@ import numpy as np
 from datetime import datetime
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="AI 股市戰情室 v11.1", layout="wide")
-st.title("🤖 AI 股市戰情室 v11.1")
-st.caption("視覺修復版：整合式報價卡 (Unified Quote Card) + 獨立走勢圖")
+st.set_page_config(page_title="AI 股市戰情室 v13.0 (Debug)", layout="wide")
+st.title("🤖 AI 股市戰情室 v13.0 (Debug)")
+st.caption("偵錯版：顯示真實錯誤訊息，不隱藏 Exception")
 
 # --- 2. 輸入與設定區 ---
 st.markdown("### 1️⃣ 選擇市場")
@@ -27,12 +27,12 @@ col_input, col_days = st.columns([2, 1])
 with col_input:
     if market_mode == "🇺🇸 美股 (US)":
         default_ticker = "NVDA"
-        label_text = "美股代碼 (如 NVDA, TSLA)"
+        label_text = "美股代碼"
         currency = "USD"
         currency_symbol = "$"
     else:
         default_ticker = "2330"
-        label_text = "台股代碼 (如 2330, 2603)"
+        label_text = "台股代碼"
         currency = "TWD"
         currency_symbol = "NT$"
         
@@ -41,52 +41,75 @@ with col_input:
 with col_days:
     forecast_days = st.selectbox("預測天數", [30, 60, 90, 180], index=1)
 
-# --- 3. 資料獲取函數 ---
-@st.cache_data
+# --- 3. 資料獲取函數 (Debug 模式：不使用 try-except 靜默失敗) ---
+# 注意：這裡移除了 @st.cache_data，確保每次都真的去連線，測試是否被封鎖
 def get_stock_data(ticker, market):
-    try:
-        if market == "🇹🇼 台股 (TW)":
-            if not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
-                test_ticker = f"{ticker}.TW"
-            else:
-                test_ticker = ticker
-            stock = yf.Ticker(test_ticker)
-            hist = stock.history(period="5y", auto_adjust=True)
-            if hist is None or hist.empty:
-                test_ticker = f"{ticker}.TWO"
-                stock = yf.Ticker(test_ticker)
-                hist = stock.history(period="5y", auto_adjust=True)
+    logs = [] # 用來收集錯誤訊息
+    stock = None
+    
+    # 1. 決定代碼格式
+    target_tickers = []
+    if market == "🇹🇼 台股 (TW)":
+        if not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
+            target_tickers.append(f"{ticker}.TW")
+            target_tickers.append(f"{ticker}.TWO")
         else:
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period="5y", auto_adjust=True)
+            target_tickers.append(ticker)
+    else:
+        target_tickers.append(ticker)
 
-        if hist is None or hist.empty:
-            hist = stock.history(period="5y", auto_adjust=False)
-        
-        if hist is None or hist.empty:
-            return None, None, None, None
-
-        hist.reset_index(inplace=True)
-        if 'Date' in hist.columns:
-             hist['Date'] = hist['Date'].dt.tz_localize(None)
-        
+    # 2. 嘗試連線
+    hist = None
+    real_symbol = ticker
+    
+    for t in target_tickers:
         try:
-            intraday = stock.history(period="1d", interval="5m", auto_adjust=True)
-            if intraday is not None and not intraday.empty:
-                intraday.reset_index(inplace=True)
-                if 'Datetime' in intraday.columns:
-                    intraday['Datetime'] = intraday['Datetime'].dt.tz_localize(None)
-            else:
-                intraday = None
-        except:
-            intraday = None
-        
-        info = stock.info
-        real_symbol = stock.ticker 
-        return hist, info, real_symbol, intraday
+            logs.append(f"嘗試連線代碼: {t} ...")
+            temp_stock = yf.Ticker(t)
+            temp_hist = temp_stock.history(period="5y", auto_adjust=True)
+            
+            if temp_hist is None or temp_hist.empty:
+                logs.append(f"❌ {t}: 回傳空數據 (Empty DataFrame)")
+                # 備用：嘗試不自動調整
+                temp_hist = temp_stock.history(period="5y", auto_adjust=False)
+            
+            if temp_hist is not None and not temp_hist.empty:
+                stock = temp_stock
+                hist = temp_hist
+                real_symbol = t
+                logs.append(f"✅ {t}: 成功獲取數據！")
+                break # 成功就跳出
+        except Exception as e:
+            logs.append(f"❌ {t} 發生錯誤: {str(e)}")
 
-    except Exception:
-        return None, None, None, None
+    if hist is None or hist.empty:
+        return None, None, None, None, logs
+
+    # 3. 數據整理
+    hist.reset_index(inplace=True)
+    if 'Date' in hist.columns:
+            hist['Date'] = hist['Date'].dt.tz_localize(None)
+    
+    # 4. 抓取當日分時 (獨立錯誤處理)
+    intraday = None
+    try:
+        intraday = stock.history(period="1d", interval="5m", auto_adjust=True)
+        if intraday is not None and not intraday.empty:
+            intraday.reset_index(inplace=True)
+            if 'Datetime' in intraday.columns:
+                intraday['Datetime'] = intraday['Datetime'].dt.tz_localize(None)
+    except Exception as e:
+        logs.append(f"⚠️ 分時數據獲取失敗: {str(e)}")
+    
+    # 5. 抓取基本面 (獨立錯誤處理)
+    info = {}
+    try:
+        info = stock.info
+    except Exception as e:
+        logs.append(f"⚠️ 基本面獲取失敗: {str(e)}")
+    
+    return hist, info, real_symbol, intraday, logs
+
 
 # --- 4. AI 預測函數 ---
 def predict_stock(data, days):
@@ -118,7 +141,6 @@ def backtest_model(data, test_days=5):
 def plot_gauge(current, future, c_symbol):
     raw_change_pct = ((future - current) / current) * 100
     change_pct = round(raw_change_pct, 3)
-    
     if change_pct >= 10: rating, color = "強烈買進", "#00CC96"
     elif change_pct >= 5: rating, color = "買進", "#2ca02c"
     elif change_pct > -5: rating, color = "持守", "#ffbf00"
@@ -150,17 +172,13 @@ def plot_intraday(intraday_data, symbol, currency_symbol):
         low=intraday_data['Low'], close=intraday_data['Close'],
         name="Price"
     ))
-    # 優化圖表背景與邊距，使其看起來更簡潔
     fig.update_layout(
         title=dict(text=f"📉 當日走勢 (5分K)", font=dict(size=14, color="#ccc")),
-        xaxis_rangeslider_visible=False,
-        height=300,
+        xaxis_rangeslider_visible=False, height=300,
         margin=dict(l=10, r=10, t=40, b=20),
-        paper_bgcolor="#0E1117", # 深色背景
-        plot_bgcolor="#0E1117",
+        paper_bgcolor="#1e212b", plot_bgcolor="#1e212b",
         font=dict(color="#aaa"),
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor="#333", title=currency_symbol)
+        xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#333", title=currency_symbol)
     )
     return fig
 
@@ -186,76 +204,75 @@ if ticker_input:
     ticker_clean = ticker_input.upper().strip()
     
     with st.spinner(f'AI 正在搜尋 {market_mode} 數據...'):
-        hist, info, real_symbol, intraday = get_stock_data(ticker_clean, market_mode)
+        # 接收五個值 (含 logs)
+        hist, info, real_symbol, intraday, logs = get_stock_data(ticker_clean, market_mode)
 
         if hist is None or hist.empty:
             st.error(f"❌ 找不到代碼 '{ticker_clean}'")
+            
+            # 【Debug 區塊：顯示詳細錯誤原因】
+            st.warning("🕵️‍♂️ 偵錯日誌 (Debug Logs):")
+            for log in logs:
+                st.code(log)
+                
+            if market_mode == "🇹🇼 台股 (TW)":
+                st.info("💡 提示：台股請輸入數字代碼，如 2330 (台積電), 2603 (長榮)。")
         else:
-            # (A) 整合式即時報價卡 (Unified Quote Card)
-            # 這是解決視覺斷裂的關鍵：用一個大的 HTML div 包住所有文字資訊
+            # (A) 全能資訊卡 (HTML 修復版：移除所有前方空格)
             last_row = hist.iloc[-1]
             current_price = last_row['Close']
             prev_price = hist.iloc[-2]['Close']
             delta = current_price - prev_price
             pct = (delta / prev_price) * 100
-            color = "#00CC96" if delta >= 0 else "#FF4B4B" # Streamlit 風格綠/紅
+            color = "#00CC96" if delta >= 0 else "#FF4B4B"
             
             day_open = last_row['Open']
             day_high = last_row['High']
             day_low = last_row['Low']
-            day_vol = last_row['Volume']
+            day_vol = format_large_number(last_row['Volume'], currency_symbol)
             
-            # 使用 CSS Grid 來排列下方的四個數據，保證對齊且不跑版
-            st.markdown(f"""
-            <div style="background-color: #1e212b; border-radius: 15px; padding: 20px; border: 1px solid #444; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
-                <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 15px;">
-                    <div>
-                        <h3 style="margin:0; color: #ccc; font-size: 1.2em;">{real_symbol}</h3>
-                        <div style="display: flex; align-items: baseline; gap: 10px;">
-                            <h1 style="margin:0; font-size: 2.8em; color: {color};">{currency_symbol}{current_price:.2f}</h1>
-                            <span style="font-size: 1.2em; color: {color}; font-weight: bold;">{delta:+.2f} ({pct:+.2f}%)</span>
-                        </div>
-                    </div>
-                </div>
-                <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; border-top: 1px solid #444; padding-top: 15px;">
-                    <div style="text-align: center;">
-                        <div style="color: #888; font-size: 0.8em;">開盤</div>
-                        <div style="font-weight: bold; color: #eee;">{day_open:.2f}</div>
-                    </div>
-                    <div style="text-align: center;">
-                        <div style="color: #888; font-size: 0.8em;">最高</div>
-                        <div style="font-weight: bold; color: #eee;">{day_high:.2f}</div>
-                    </div>
-                    <div style="text-align: center;">
-                        <div style="color: #888; font-size: 0.8em;">最低</div>
-                        <div style="font-weight: bold; color: #eee;">{day_low:.2f}</div>
-                    </div>
-                    <div style="text-align: center;">
-                        <div style="color: #888; font-size: 0.8em;">量</div>
-                        <div style="font-weight: bold; color: #eee;">{format_large_number(day_vol, currency_symbol)}</div>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            mkt_cap = format_large_number(info.get('marketCap'), currency_symbol)
+            pe_ratio = f"{info.get('trailingPE', 'N/A')}"
+            eps = f"{info.get('trailingEps', 'N/A')}"
+            high_52 = f"{info.get('fiftyTwoWeekHigh', 'N/A')}"
 
-            # (A-2) 當日走勢圖 (獨立顯示，不再嘗試包進 div)
+            # 使用 f-string 且完全靠左
+            card_html = f"""
+<div style="background-color: #1e212b; border-radius: 15px; padding: 20px; border: 1px solid #444; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
+<div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 15px;">
+<div>
+<h3 style="margin:0; color: #ccc; font-size: 1.2em;">{real_symbol}</h3>
+<div style="display: flex; align-items: baseline; gap: 10px;">
+<h1 style="margin:0; font-size: 2.8em; color: {color};">{currency_symbol}{current_price:.2f}</h1>
+<span style="font-size: 1.2em; color: {color}; font-weight: bold;">{delta:+.2f} ({pct:+.2f}%)</span>
+</div>
+</div>
+</div>
+<div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding-bottom: 15px;">
+<div style="text-align: center;"><div style="color: #888; font-size: 0.8em;">開盤</div><div style="font-weight: bold; color: #eee;">{day_open:.2f}</div></div>
+<div style="text-align: center;"><div style="color: #888; font-size: 0.8em;">最高</div><div style="font-weight: bold; color: #eee;">{day_high:.2f}</div></div>
+<div style="text-align: center;"><div style="color: #888; font-size: 0.8em;">最低</div><div style="font-weight: bold; color: #eee;">{day_low:.2f}</div></div>
+<div style="text-align: center;"><div style="color: #888; font-size: 0.8em;">量</div><div style="font-weight: bold; color: #eee;">{day_vol}</div></div>
+</div>
+<div style="border-top: 1px dashed #444; margin: 0 0 15px 0;"></div>
+<div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;">
+<div style="text-align: center;"><div style="color: #aaa; font-size: 0.8em;">市值</div><div style="color: #ddd;">{mkt_cap}</div></div>
+<div style="text-align: center;"><div style="color: #aaa; font-size: 0.8em;">本益比</div><div style="color: #ddd;">{pe_ratio}</div></div>
+<div style="text-align: center;"><div style="color: #aaa; font-size: 0.8em;">EPS</div><div style="color: #ddd;">{eps}</div></div>
+<div style="text-align: center;"><div style="color: #aaa; font-size: 0.8em;">52週高</div><div style="color: #ddd;">{high_52}</div></div>
+</div>
+</div>
+"""
+            st.markdown(card_html, unsafe_allow_html=True)
+
+            # (B) 走勢圖
             if intraday is not None and not intraday.empty:
                 intraday_chart = plot_intraday(intraday, real_symbol, currency_symbol)
                 st.plotly_chart(intraday_chart, use_container_width=True)
             else:
-                st.caption("💤 目前無即時分時數據 (可能為盤前或休市)")
+                st.caption("💤 目前無即時分時數據")
 
             st.divider()
-
-            # (B) 基本面
-            if info:
-                st.subheader("📊 基本面健檢")
-                c1, c2, c3, c4 = st.columns(4)
-                with c1: st.metric("市值", format_large_number(info.get('marketCap'), currency_symbol))
-                with c2: st.metric("PE", f"{info.get('trailingPE', 'N/A')}")
-                with c3: st.metric("EPS", f"{info.get('trailingEps', 'N/A')}")
-                with c4: st.metric("52週高", f"{currency_symbol}{info.get('fiftyTwoWeekHigh', 0)}")
-                st.divider()
 
             try:
                 # (C) AI 預測
