@@ -7,18 +7,17 @@ from prophet.plot import plot_plotly
 import numpy as np
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="AI 股市預測 v9.0", layout="wide")
-st.title("🤖 AI 股市預測 v9.0")
-st.caption("介面優化版：市場開關移至主頁面")
+st.set_page_config(page_title="AI 股市預測 v9.1", layout="wide")
+st.title("🤖 AI 股市預測 v9.1")
+st.caption("優化版：修正台股市值單位 (兆) & 簡化百分比顯示")
 
-# --- 2. 輸入與設定區 (移除側邊欄，改為置頂開關) ---
-# 使用 horizontal=True 讓選項變成橫向排列，像分頁開關一樣
+# --- 2. 輸入與設定區 ---
 st.markdown("### 1️⃣ 選擇市場")
 market_mode = st.radio(
     "選擇市場", 
     ["🇺🇸 美股 (US)", "🇹🇼 台股 (TW)"], 
     horizontal=True,
-    label_visibility="collapsed" # 隱藏標題，讓介面更簡潔
+    label_visibility="collapsed"
 )
 
 st.markdown("### 2️⃣ 輸入代碼")
@@ -46,6 +45,7 @@ with col_days:
 def get_stock_data(ticker, market):
     try:
         if market == "🇹🇼 台股 (TW)":
+            # 台股自動後綴判斷
             if not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
                 test_ticker = f"{ticker}.TW"
             else:
@@ -59,6 +59,7 @@ def get_stock_data(ticker, market):
                 stock = yf.Ticker(test_ticker)
                 hist = stock.history(period="5y", auto_adjust=True)
         else:
+            # 美股
             stock = yf.Ticker(ticker)
             hist = stock.history(period="5y", auto_adjust=True)
 
@@ -108,9 +109,12 @@ def backtest_model(data, test_days=5):
     acc_score = 100 - result['error_pct'].mean()
     return acc_score, result
 
-# --- 6. 繪圖輔助函數 ---
+# --- 6. 繪圖輔助函數 (修正小數位數) ---
 def plot_gauge(current, future, c_symbol):
-    change_pct = ((future - current) / current) * 100
+    # 計算漲跌幅
+    raw_change_pct = ((future - current) / current) * 100
+    # 【修正 2】強制四捨五入到小數點後 3 位
+    change_pct = round(raw_change_pct, 3)
     
     if change_pct >= 10: 
         rating, color = "強烈買進", "#00CC96"
@@ -127,7 +131,8 @@ def plot_gauge(current, future, c_symbol):
         mode = "gauge+number", 
         value = change_pct,
         title = {'text': f"AI 建議: {rating}", 'font': {'size': 20}},
-        number = {'suffix': "%", 'font': {'color': color}, 'valueformat': "+.1f"},
+        # 【修正 2】格式化字串改為 .3f (三位小數)
+        number = {'suffix': "%", 'font': {'color': color}, 'valueformat': "+.3f"},
         gauge = {
             'axis': {'range': [-30, 30]}, 
             'bar': {'color': "white"}, 
@@ -155,22 +160,28 @@ def plot_gauge(current, future, c_symbol):
     return fig, change_pct
 
 def get_ai_explanation(ticker, days, pct):
+    # 這裡顯示也同步簡化顯示
     if pct >= 10: return f"🚀 **強烈看漲**：{ticker} 動能強勁 (>10%)，多頭排列穩固。"
     elif pct >= 5: return f"📈 **看漲**：{ticker} 呈溫和上升趨勢，適合佈局。"
     elif pct > -5: return f"⚖️ **持守**：{ticker} 預期區間震盪，建議觀望。"
     elif pct > -10: return f"📉 **看跌**：動能轉弱，{ticker} 面臨回調壓力。"
     else: return f"⚠️ **強烈看跌**：{ticker} 下行風險高，建議避開。"
 
+# --- 7. 格式化函數 (修正台股市值單位) ---
 def format_large_number(num, c_symbol):
     if num is None: return "N/A"
     if c_symbol == "NT$":
-        return f"{num/1e8:.1f}億"
+        # 【修正 1】台股單位邏輯：大於1兆顯示兆，否則顯示億
+        if num >= 1e12:
+            return f"{num/1e12:.2f}兆"
+        return f"{num/1e8:.2f}億"
     else:
+        # 美股單位邏輯
         if num >= 1e12: return f"{num/1e12:.2f}T"
         if num >= 1e9: return f"{num/1e9:.2f}B"
         return f"{num/1e6:.2f}M"
 
-# --- 7. 主程式執行區 ---
+# --- 8. 主程式執行區 ---
 if ticker_input:
     ticker_clean = ticker_input.upper().strip()
     
