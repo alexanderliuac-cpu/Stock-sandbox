@@ -5,11 +5,12 @@ import plotly.graph_objects as go
 from prophet import Prophet
 from prophet.plot import plot_plotly
 import numpy as np
+from datetime import datetime
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="AI 股市預測 v10.0", layout="wide")
-st.title("🤖 AI 股市預測 v10.0")
-st.caption("介面升級版：新增頂部即時報價條 (Real-time Quote Bar)")
+st.set_page_config(page_title="AI 股市戰情室 v11.0", layout="wide")
+st.title("🤖 AI 股市戰情室 v11.0")
+st.caption("戰情室版：新增當日分時走勢圖 (Intraday 5-min Chart)")
 
 # --- 2. 輸入與設定區 ---
 st.markdown("### 1️⃣ 選擇市場")
@@ -40,19 +41,20 @@ with col_input:
 with col_days:
     forecast_days = st.selectbox("預測天數", [30, 60, 90, 180], index=1)
 
-# --- 3. 資料獲取函數 ---
+# --- 3. 資料獲取函數 (長線 + 當日) ---
 @st.cache_data
 def get_stock_data(ticker, market):
     try:
+        # 1. 處理代碼後綴
         if market == "🇹🇼 台股 (TW)":
             if not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
                 test_ticker = f"{ticker}.TW"
             else:
                 test_ticker = ticker
-            
+            # 先測上市
             stock = yf.Ticker(test_ticker)
             hist = stock.history(period="5y", auto_adjust=True)
-            
+            # 失敗測上櫃
             if hist is None or hist.empty:
                 test_ticker = f"{ticker}.TWO"
                 stock = yf.Ticker(test_ticker)
@@ -61,22 +63,38 @@ def get_stock_data(ticker, market):
             stock = yf.Ticker(ticker)
             hist = stock.history(period="5y", auto_adjust=True)
 
+        # 容錯：抓不到自動調整就抓原始
         if hist is None or hist.empty:
             hist = stock.history(period="5y", auto_adjust=False)
         
         if hist is None or hist.empty:
-            return None, None, None
+            return None, None, None, None
 
+        # 處理長線資料格式
         hist.reset_index(inplace=True)
         if 'Date' in hist.columns:
              hist['Date'] = hist['Date'].dt.tz_localize(None)
         
+        # 2. 抓取「當日」分鐘級資料 (用於畫今日線圖)
+        # 注意：假日抓不到資料是正常的，這裡不做強求
+        try:
+            intraday = stock.history(period="1d", interval="5m", auto_adjust=True)
+            if intraday is not None and not intraday.empty:
+                intraday.reset_index(inplace=True)
+                # 統一時區處理
+                if 'Datetime' in intraday.columns:
+                    intraday['Datetime'] = intraday['Datetime'].dt.tz_localize(None)
+            else:
+                intraday = None
+        except:
+            intraday = None
+        
         info = stock.info
         real_symbol = stock.ticker 
-        return hist, info, real_symbol
+        return hist, info, real_symbol, intraday
 
     except Exception:
-        return None, None, None
+        return None, None, None, None
 
 # --- 4. AI 預測函數 ---
 def predict_stock(data, days):
@@ -134,18 +152,38 @@ def plot_gauge(current, future, c_symbol):
                 {'range': [5, 10], 'color': '#2ca02c'},
                 {'range': [10, 30], 'color': '#00CC96'}
             ],
-            'threshold': {
-                'line': {'color': "white", 'width': 4}, 
-                'thickness': 0.75, 
-                'value': change_pct
-            }
+            'threshold': {'line': {'color': "white", 'width': 4}, 'thickness': 0.75, 'value': change_pct}
         }
     ))
-    fig.update_layout(
-        height=300, margin=dict(l=20,r=20,t=50,b=20), 
-        paper_bgcolor="#0E1117", font={'color': "white"}
-    )
+    fig.update_layout(height=300, margin=dict(l=20,r=20,t=50,b=20), paper_bgcolor="#0E1117", font={'color': "white"})
     return fig, change_pct
+
+def plot_intraday(intraday_data, symbol, currency_symbol):
+    """繪製當日分鐘級走勢圖"""
+    fig = go.Figure()
+    
+    # 使用 K 線圖 (Candlestick)
+    fig.add_trace(go.Candlestick(
+        x=intraday_data['Datetime'],
+        open=intraday_data['Open'],
+        high=intraday_data['High'],
+        low=intraday_data['Low'],
+        close=intraday_data['Close'],
+        name="Price"
+    ))
+    
+    # 移除底部 Range Slider 以節省空間，並優化版面
+    fig.update_layout(
+        title=dict(text=f"📊 {symbol} 今日走勢 (5分K)", font=dict(size=14, color="#ccc")),
+        xaxis_rangeslider_visible=False,
+        height=350, # 稍微矮一點，適合嵌入
+        margin=dict(l=10, r=10, t=30, b=20),
+        paper_bgcolor="#1e212b", # 配合報價區背景色
+        plot_bgcolor="#1e212b",
+        xaxis=dict(showgrid=False, color="#888"),
+        yaxis=dict(showgrid=True, gridcolor="#333", color="#888", title=currency_symbol)
+    )
+    return fig
 
 def get_ai_explanation(ticker, days, pct):
     if pct >= 10: return f"🚀 **強烈看漲**：{ticker} 動能強勁 (>10%)，多頭排列穩固。"
@@ -154,7 +192,6 @@ def get_ai_explanation(ticker, days, pct):
     elif pct > -10: return f"📉 **看跌**：動能轉弱，{ticker} 面臨回調壓力。"
     else: return f"⚠️ **強烈看跌**：{ticker} 下行風險高，建議避開。"
 
-# --- 7. 格式化函數 ---
 def format_large_number(num, c_symbol):
     if num is None: return "N/A"
     if c_symbol == "NT$":
@@ -169,15 +206,16 @@ def format_large_number(num, c_symbol):
 if ticker_input:
     ticker_clean = ticker_input.upper().strip()
     
-    with st.spinner(f'AI 正在搜尋 {market_mode} 數據...'):
-        hist, info, real_symbol = get_stock_data(ticker_clean, market_mode)
+    with st.spinner(f'AI 正在搜尋 {market_mode} 數據 (含當日分時)...'):
+        # 【接收四個值】新增 intraday
+        hist, info, real_symbol, intraday = get_stock_data(ticker_clean, market_mode)
 
         if hist is None or hist.empty:
             st.error(f"❌ 找不到代碼 '{ticker_clean}'")
             if market_mode == "🇹🇼 台股 (TW)":
                 st.info("💡 提示：台股請輸入數字代碼，如 2330 (台積電), 2603 (長榮)。")
         else:
-            # (A) 【升級版】即時報價看板 (Real-time Quote Board)
+            # (A) 即時報價看板
             last_row = hist.iloc[-1]
             current_price = last_row['Close']
             prev_price = hist.iloc[-2]['Close']
@@ -185,15 +223,14 @@ if ticker_input:
             pct = (delta / prev_price) * 100
             color = "green" if delta >= 0 else "red"
             
-            # 取得當日詳細數據
             day_open = last_row['Open']
             day_high = last_row['High']
             day_low = last_row['Low']
             day_vol = last_row['Volume']
             
-            # 主標題區塊
+            # 1. 價格大字
             st.markdown(f"""
-            <div style="padding: 20px; border-radius: 15px; background: linear-gradient(to right, #1e212b, #262730); margin-bottom: 15px; border: 1px solid #444;">
+            <div style="padding: 20px; border-radius: 15px 15px 0 0; background: #1e212b; border: 1px solid #444; border-bottom: none;">
                 <div style="display: flex; justify-content: space-between; align_items: center;">
                     <div>
                         <h3 style="margin:0; color: #ccc;">{real_symbol}</h3>
@@ -204,21 +241,33 @@ if ticker_input:
             </div>
             """, unsafe_allow_html=True)
             
-            # 副標題：詳細報價條 (使用 columns 排列)
+            # 2. 詳細數據條
+            st.markdown("""<div style="background: #1e212b; padding: 10px; border: 1px solid #444; border-top: none;">""", unsafe_allow_html=True)
             q1, q2, q3, q4 = st.columns(4)
-            q1.metric("開盤 (Open)", f"{day_open:.2f}")
-            q2.metric("最高 (High)", f"{day_high:.2f}")
-            q3.metric("最低 (Low)", f"{day_low:.2f}")
-            q4.metric("成交量 (Vol)", format_large_number(day_vol, currency_symbol))
+            q1.metric("開盤", f"{day_open:.2f}")
+            q2.metric("最高", f"{day_high:.2f}")
+            q3.metric("最低", f"{day_low:.2f}")
+            q4.metric("量", format_large_number(day_vol, currency_symbol))
+            st.markdown("</div>", unsafe_allow_html=True)
             
+            # 3. 【新功能】今日分時走勢圖 (嵌入在報價區下方)
+            if intraday is not None and not intraday.empty:
+                st.markdown("""<div style="background: #1e212b; border: 1px solid #444; border-top: none; border-radius: 0 0 15px 15px; padding: 10px;">""", unsafe_allow_html=True)
+                intraday_chart = plot_intraday(intraday, real_symbol, currency_symbol)
+                st.plotly_chart(intraday_chart, use_container_width=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+            else:
+                # 如果是假日或還沒開盤，顯示提示
+                st.info("💤 目前無即時分時數據 (可能為休市或盤前)")
+
             st.divider()
 
-            # (B) 基本面 (放在報價之後)
+            # (B) 基本面
             if info:
                 st.subheader("📊 基本面健檢")
                 c1, c2, c3, c4 = st.columns(4)
                 with c1: st.metric("市值", format_large_number(info.get('marketCap'), currency_symbol))
-                with c2: st.metric("PE (本益比)", f"{info.get('trailingPE', 'N/A')}")
+                with c2: st.metric("PE", f"{info.get('trailingPE', 'N/A')}")
                 with c3: st.metric("EPS", f"{info.get('trailingEps', 'N/A')}")
                 with c4: st.metric("52週高", f"{currency_symbol}{info.get('fiftyTwoWeekHigh', 0)}")
                 st.divider()
