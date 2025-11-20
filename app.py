@@ -8,9 +8,9 @@ import numpy as np
 from datetime import datetime
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="AI 股市戰情室 v13.0 (Debug)", layout="wide")
-st.title("🤖 AI 股市戰情室 v13.0 (Debug)")
-st.caption("偵錯版：顯示真實錯誤訊息，不隱藏 Exception")
+st.set_page_config(page_title="AI 股市戰情室 v14.0", layout="wide")
+st.title("🤖 AI 股市戰情室 v14.0")
+st.caption("修復版：引入 Fast Info 快速通道，解決基本面 N/A 問題")
 
 # --- 2. 輸入與設定區 ---
 st.markdown("### 1️⃣ 選擇市場")
@@ -27,12 +27,12 @@ col_input, col_days = st.columns([2, 1])
 with col_input:
     if market_mode == "🇺🇸 美股 (US)":
         default_ticker = "NVDA"
-        label_text = "美股代碼"
+        label_text = "美股代碼 (如 NVDA, TSLA)"
         currency = "USD"
         currency_symbol = "$"
     else:
         default_ticker = "2330"
-        label_text = "台股代碼"
+        label_text = "台股代碼 (如 2330, 2603)"
         currency = "TWD"
         currency_symbol = "NT$"
         
@@ -41,74 +41,85 @@ with col_input:
 with col_days:
     forecast_days = st.selectbox("預測天數", [30, 60, 90, 180], index=1)
 
-# --- 3. 資料獲取函數 (Debug 模式：不使用 try-except 靜默失敗) ---
-# 注意：這裡移除了 @st.cache_data，確保每次都真的去連線，測試是否被封鎖
+# --- 3. 資料獲取函數 (新增 Fast Info 備援) ---
+@st.cache_data
 def get_stock_data(ticker, market):
-    logs = [] # 用來收集錯誤訊息
-    stock = None
-    
-    # 1. 決定代碼格式
-    target_tickers = []
-    if market == "🇹🇼 台股 (TW)":
-        if not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
-            target_tickers.append(f"{ticker}.TW")
-            target_tickers.append(f"{ticker}.TWO")
+    # A. 抓取歷史股價 (核心數據)
+    try:
+        stock = None
+        if market == "🇹🇼 台股 (TW)":
+            if not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
+                test_ticker = f"{ticker}.TW"
+            else:
+                test_ticker = ticker
+            stock = yf.Ticker(test_ticker)
+            hist = stock.history(period="5y", auto_adjust=True)
+            
+            if hist is None or hist.empty:
+                test_ticker = f"{ticker}.TWO"
+                stock = yf.Ticker(test_ticker)
+                hist = stock.history(period="5y", auto_adjust=True)
         else:
-            target_tickers.append(ticker)
-    else:
-        target_tickers.append(ticker)
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period="5y", auto_adjust=True)
 
-    # 2. 嘗試連線
-    hist = None
-    real_symbol = ticker
-    
-    for t in target_tickers:
-        try:
-            logs.append(f"嘗試連線代碼: {t} ...")
-            temp_stock = yf.Ticker(t)
-            temp_hist = temp_stock.history(period="5y", auto_adjust=True)
-            
-            if temp_hist is None or temp_hist.empty:
-                logs.append(f"❌ {t}: 回傳空數據 (Empty DataFrame)")
-                # 備用：嘗試不自動調整
-                temp_hist = temp_stock.history(period="5y", auto_adjust=False)
-            
-            if temp_hist is not None and not temp_hist.empty:
-                stock = temp_stock
-                hist = temp_hist
-                real_symbol = t
-                logs.append(f"✅ {t}: 成功獲取數據！")
-                break # 成功就跳出
-        except Exception as e:
-            logs.append(f"❌ {t} 發生錯誤: {str(e)}")
+        if hist is None or hist.empty:
+            hist = stock.history(period="5y", auto_adjust=False)
+        
+        if hist is None or hist.empty:
+            return None, None, None, None
 
-    if hist is None or hist.empty:
-        return None, None, None, None, logs
+        hist.reset_index(inplace=True)
+        if 'Date' in hist.columns:
+             hist['Date'] = hist['Date'].dt.tz_localize(None)
+        
+        # 確保 stock 物件存在
+        if stock is None:
+            stock = yf.Ticker(ticker)
 
-    # 3. 數據整理
-    hist.reset_index(inplace=True)
-    if 'Date' in hist.columns:
-            hist['Date'] = hist['Date'].dt.tz_localize(None)
-    
-    # 4. 抓取當日分時 (獨立錯誤處理)
-    intraday = None
+    except Exception:
+        return None, None, None, None
+
+    # B. 抓取當日分時 (容錯)
     try:
         intraday = stock.history(period="1d", interval="5m", auto_adjust=True)
         if intraday is not None and not intraday.empty:
             intraday.reset_index(inplace=True)
             if 'Datetime' in intraday.columns:
                 intraday['Datetime'] = intraday['Datetime'].dt.tz_localize(None)
-    except Exception as e:
-        logs.append(f"⚠️ 分時數據獲取失敗: {str(e)}")
+        else:
+            intraday = None
+    except:
+        intraday = None
     
-    # 5. 抓取基本面 (獨立錯誤處理)
+    # C. 抓取基本面 (策略：Info 優先 -> Fast Info 備援)
     info = {}
+    
+    # 1. 嘗試抓取詳細 info
     try:
         info = stock.info
-    except Exception as e:
-        logs.append(f"⚠️ 基本面獲取失敗: {str(e)}")
+        if info is None: info = {}
+    except:
+        info = {}
     
-    return hist, info, real_symbol, intraday, logs
+    # 2. 【關鍵修復】如果 info 抓失敗或是缺市值的 key，改用 fast_info 補救
+    # fast_info 使用不同的通道，較不容易被擋
+    try:
+        if 'marketCap' not in info or info['marketCap'] is None:
+            fast = stock.fast_info
+            # 檢查 fast_info 是否有市值資料
+            if hasattr(fast, 'market_cap') and fast.market_cap is not None:
+                info['marketCap'] = fast.market_cap
+            
+            # 也可以順便補救 52週高 (如果 info 沒抓到)
+            if 'fiftyTwoWeekHigh' not in info or info['fiftyTwoWeekHigh'] is None:
+                 if hasattr(fast, 'year_high') and fast.year_high is not None:
+                     info['fiftyTwoWeekHigh'] = fast.year_high
+    except:
+        pass # 如果連 fast_info 都失敗，那就真的沒轍了
+    
+    real_symbol = stock.ticker 
+    return hist, info, real_symbol, intraday
 
 
 # --- 4. AI 預測函數 ---
@@ -204,21 +215,14 @@ if ticker_input:
     ticker_clean = ticker_input.upper().strip()
     
     with st.spinner(f'AI 正在搜尋 {market_mode} 數據...'):
-        # 接收五個值 (含 logs)
-        hist, info, real_symbol, intraday, logs = get_stock_data(ticker_clean, market_mode)
+        hist, info, real_symbol, intraday = get_stock_data(ticker_clean, market_mode)
 
         if hist is None or hist.empty:
             st.error(f"❌ 找不到代碼 '{ticker_clean}'")
-            
-            # 【Debug 區塊：顯示詳細錯誤原因】
-            st.warning("🕵️‍♂️ 偵錯日誌 (Debug Logs):")
-            for log in logs:
-                st.code(log)
-                
             if market_mode == "🇹🇼 台股 (TW)":
                 st.info("💡 提示：台股請輸入數字代碼，如 2330 (台積電), 2603 (長榮)。")
         else:
-            # (A) 全能資訊卡 (HTML 修復版：移除所有前方空格)
+            # (A) 全能資訊卡 (HTML 修復版)
             last_row = hist.iloc[-1]
             current_price = last_row['Close']
             prev_price = hist.iloc[-2]['Close']
@@ -231,6 +235,7 @@ if ticker_input:
             day_low = last_row['Low']
             day_vol = format_large_number(last_row['Volume'], currency_symbol)
             
+            # 這裡使用 .get 並給予預設值，避免 N/A 太難看
             mkt_cap = format_large_number(info.get('marketCap'), currency_symbol)
             pe_ratio = f"{info.get('trailingPE', 'N/A')}"
             eps = f"{info.get('trailingEps', 'N/A')}"
