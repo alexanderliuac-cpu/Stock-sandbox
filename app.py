@@ -7,35 +7,41 @@ from prophet.plot import plot_plotly
 import numpy as np
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="AI 股市預測 v8.1", layout="wide")
-st.title("🤖 AI 股市預測 v8.1")
-st.caption("雙市場版：支援 🇺🇸 美股 & 🇹🇼 台股 (修復複製斷行問題)")
+st.set_page_config(page_title="AI 股市預測 v9.0", layout="wide")
+st.title("🤖 AI 股市預測 v9.0")
+st.caption("介面優化版：市場開關移至主頁面")
 
-# --- 2. 側邊欄：市場選擇 ---
-st.sidebar.header("設定")
-market_mode = st.sidebar.radio("選擇市場", ["🇺🇸 美股 (US)", "🇹🇼 台股 (TW)"])
+# --- 2. 輸入與設定區 (移除側邊欄，改為置頂開關) ---
+# 使用 horizontal=True 讓選項變成橫向排列，像分頁開關一樣
+st.markdown("### 1️⃣ 選擇市場")
+market_mode = st.radio(
+    "選擇市場", 
+    ["🇺🇸 美股 (US)", "🇹🇼 台股 (TW)"], 
+    horizontal=True,
+    label_visibility="collapsed" # 隱藏標題，讓介面更簡潔
+)
 
-# --- 3. 輸入區 ---
+st.markdown("### 2️⃣ 輸入代碼")
 col_input, col_days = st.columns([2, 1])
 
 with col_input:
     if market_mode == "🇺🇸 美股 (US)":
         default_ticker = "NVDA"
-        label_text = "請輸入美股代碼 (如 NVDA, TSLA)"
+        label_text = "美股代碼 (如 NVDA, TSLA)"
         currency = "USD"
         currency_symbol = "$"
     else:
         default_ticker = "2330"
-        label_text = "請輸入台股代碼 (如 2330, 0050)"
+        label_text = "台股代碼 (如 2330, 2603)"
         currency = "TWD"
         currency_symbol = "NT$"
         
     ticker_input = st.text_input(label_text, value=default_ticker)
 
 with col_days:
-    forecast_days = st.selectbox("預測範圍", [30, 60, 90, 180], index=1)
+    forecast_days = st.selectbox("預測天數", [30, 60, 90, 180], index=1)
 
-# --- 4. 資料獲取函數 ---
+# --- 3. 資料獲取函數 ---
 @st.cache_data
 def get_stock_data(ticker, market):
     try:
@@ -73,7 +79,7 @@ def get_stock_data(ticker, market):
     except Exception:
         return None, None, None
 
-# --- 5. AI 預測函數 ---
+# --- 4. AI 預測函數 ---
 def predict_stock(data, days):
     df_train = data[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
     m = Prophet(daily_seasonality=False, changepoint_prior_scale=0.5)
@@ -85,7 +91,7 @@ def predict_stock(data, days):
     forecast[cols_to_fix] = forecast[cols_to_fix].clip(lower=0)
     return m, forecast
 
-# --- 6. 回測函數 ---
+# --- 5. 回測函數 ---
 def backtest_model(data, test_days=5):
     df_full = data[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
     train_df = df_full.iloc[:-test_days]
@@ -102,11 +108,10 @@ def backtest_model(data, test_days=5):
     acc_score = 100 - result['error_pct'].mean()
     return acc_score, result
 
-# --- 7. 繪圖輔助函數 (已修復斷行問題) ---
+# --- 6. 繪圖輔助函數 ---
 def plot_gauge(current, future, c_symbol):
     change_pct = ((future - current) / current) * 100
     
-    # 設定評級
     if change_pct >= 10: 
         rating, color = "強烈買進", "#00CC96"
     elif change_pct >= 5: 
@@ -118,7 +123,6 @@ def plot_gauge(current, future, c_symbol):
     else: 
         rating, color = "強烈賣出", "#8c1515"
 
-    # 建立圖表
     fig = go.Figure(go.Indicator(
         mode = "gauge+number", 
         value = change_pct,
@@ -128,7 +132,6 @@ def plot_gauge(current, future, c_symbol):
             'axis': {'range': [-30, 30]}, 
             'bar': {'color': "white"}, 
             'bgcolor': "black",
-            # 【這裡改為垂直排列，避免複製錯誤】
             'steps': [
                 {'range': [-30, -10], 'color': '#8c1515'},
                 {'range': [-10, -5], 'color': '#d62728'},
@@ -167,7 +170,7 @@ def format_large_number(num, c_symbol):
         if num >= 1e9: return f"{num/1e9:.2f}B"
         return f"{num/1e6:.2f}M"
 
-# --- 8. 主程式執行區 ---
+# --- 7. 主程式執行區 ---
 if ticker_input:
     ticker_clean = ticker_input.upper().strip()
     
