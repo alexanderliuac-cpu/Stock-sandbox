@@ -7,9 +7,9 @@ from prophet.plot import plot_plotly
 import numpy as np
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="AI 股市預測 v9.1", layout="wide")
-st.title("🤖 AI 股市預測 v9.1")
-st.caption("優化版：修正台股市值單位 (兆) & 簡化百分比顯示")
+st.set_page_config(page_title="AI 股市預測 v10.0", layout="wide")
+st.title("🤖 AI 股市預測 v10.0")
+st.caption("介面升級版：新增頂部即時報價條 (Real-time Quote Bar)")
 
 # --- 2. 輸入與設定區 ---
 st.markdown("### 1️⃣ 選擇市場")
@@ -45,7 +45,6 @@ with col_days:
 def get_stock_data(ticker, market):
     try:
         if market == "🇹🇼 台股 (TW)":
-            # 台股自動後綴判斷
             if not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
                 test_ticker = f"{ticker}.TW"
             else:
@@ -59,7 +58,6 @@ def get_stock_data(ticker, market):
                 stock = yf.Ticker(test_ticker)
                 hist = stock.history(period="5y", auto_adjust=True)
         else:
-            # 美股
             stock = yf.Ticker(ticker)
             hist = stock.history(period="5y", auto_adjust=True)
 
@@ -109,29 +107,21 @@ def backtest_model(data, test_days=5):
     acc_score = 100 - result['error_pct'].mean()
     return acc_score, result
 
-# --- 6. 繪圖輔助函數 (修正小數位數) ---
+# --- 6. 繪圖輔助函數 ---
 def plot_gauge(current, future, c_symbol):
-    # 計算漲跌幅
     raw_change_pct = ((future - current) / current) * 100
-    # 【修正 2】強制四捨五入到小數點後 3 位
     change_pct = round(raw_change_pct, 3)
     
-    if change_pct >= 10: 
-        rating, color = "強烈買進", "#00CC96"
-    elif change_pct >= 5: 
-        rating, color = "買進", "#2ca02c"
-    elif change_pct > -5: 
-        rating, color = "持守", "#ffbf00"
-    elif change_pct > -10: 
-        rating, color = "賣出", "#d62728"
-    else: 
-        rating, color = "強烈賣出", "#8c1515"
+    if change_pct >= 10: rating, color = "強烈買進", "#00CC96"
+    elif change_pct >= 5: rating, color = "買進", "#2ca02c"
+    elif change_pct > -5: rating, color = "持守", "#ffbf00"
+    elif change_pct > -10: rating, color = "賣出", "#d62728"
+    else: rating, color = "強烈賣出", "#8c1515"
 
     fig = go.Figure(go.Indicator(
         mode = "gauge+number", 
         value = change_pct,
         title = {'text': f"AI 建議: {rating}", 'font': {'size': 20}},
-        # 【修正 2】格式化字串改為 .3f (三位小數)
         number = {'suffix': "%", 'font': {'color': color}, 'valueformat': "+.3f"},
         gauge = {
             'axis': {'range': [-30, 30]}, 
@@ -152,31 +142,25 @@ def plot_gauge(current, future, c_symbol):
         }
     ))
     fig.update_layout(
-        height=300, 
-        margin=dict(l=20,r=20,t=50,b=20), 
-        paper_bgcolor="#0E1117", 
-        font={'color': "white"}
+        height=300, margin=dict(l=20,r=20,t=50,b=20), 
+        paper_bgcolor="#0E1117", font={'color': "white"}
     )
     return fig, change_pct
 
 def get_ai_explanation(ticker, days, pct):
-    # 這裡顯示也同步簡化顯示
     if pct >= 10: return f"🚀 **強烈看漲**：{ticker} 動能強勁 (>10%)，多頭排列穩固。"
     elif pct >= 5: return f"📈 **看漲**：{ticker} 呈溫和上升趨勢，適合佈局。"
     elif pct > -5: return f"⚖️ **持守**：{ticker} 預期區間震盪，建議觀望。"
     elif pct > -10: return f"📉 **看跌**：動能轉弱，{ticker} 面臨回調壓力。"
     else: return f"⚠️ **強烈看跌**：{ticker} 下行風險高，建議避開。"
 
-# --- 7. 格式化函數 (修正台股市值單位) ---
+# --- 7. 格式化函數 ---
 def format_large_number(num, c_symbol):
     if num is None: return "N/A"
     if c_symbol == "NT$":
-        # 【修正 1】台股單位邏輯：大於1兆顯示兆，否則顯示億
-        if num >= 1e12:
-            return f"{num/1e12:.2f}兆"
+        if num >= 1e12: return f"{num/1e12:.2f}兆"
         return f"{num/1e8:.2f}億"
     else:
-        # 美股單位邏輯
         if num >= 1e12: return f"{num/1e12:.2f}T"
         if num >= 1e9: return f"{num/1e9:.2f}B"
         return f"{num/1e6:.2f}M"
@@ -193,22 +177,43 @@ if ticker_input:
             if market_mode == "🇹🇼 台股 (TW)":
                 st.info("💡 提示：台股請輸入數字代碼，如 2330 (台積電), 2603 (長榮)。")
         else:
-            # (A) 顯示價格
-            current_price = hist['Close'].iloc[-1]
-            prev_price = hist['Close'].iloc[-2]
+            # (A) 【升級版】即時報價看板 (Real-time Quote Board)
+            last_row = hist.iloc[-1]
+            current_price = last_row['Close']
+            prev_price = hist.iloc[-2]['Close']
             delta = current_price - prev_price
             pct = (delta / prev_price) * 100
             color = "green" if delta >= 0 else "red"
             
+            # 取得當日詳細數據
+            day_open = last_row['Open']
+            day_high = last_row['High']
+            day_low = last_row['Low']
+            day_vol = last_row['Volume']
+            
+            # 主標題區塊
             st.markdown(f"""
-            <div style="padding: 15px; border-radius: 10px; background-color: #262730; margin-bottom: 20px;">
-                <h3 style="margin:0; color: #aaa;">{real_symbol} ({currency})</h3>
-                <h1 style="margin:0; color: {color};">{currency_symbol}{current_price:.2f}</h1>
-                <p style="margin:0; color: {color};">{delta:+.2f} ({pct:+.2f}%)</p>
+            <div style="padding: 20px; border-radius: 15px; background: linear-gradient(to right, #1e212b, #262730); margin-bottom: 15px; border: 1px solid #444;">
+                <div style="display: flex; justify-content: space-between; align_items: center;">
+                    <div>
+                        <h3 style="margin:0; color: #ccc;">{real_symbol}</h3>
+                        <h1 style="margin:0; font-size: 3em; color: {color};">{currency_symbol}{current_price:.2f}</h1>
+                        <span style="font-size: 1.2em; color: {color}; font-weight: bold;">{delta:+.2f} ({pct:+.2f}%)</span>
+                    </div>
+                </div>
             </div>
             """, unsafe_allow_html=True)
+            
+            # 副標題：詳細報價條 (使用 columns 排列)
+            q1, q2, q3, q4 = st.columns(4)
+            q1.metric("開盤 (Open)", f"{day_open:.2f}")
+            q2.metric("最高 (High)", f"{day_high:.2f}")
+            q3.metric("最低 (Low)", f"{day_low:.2f}")
+            q4.metric("成交量 (Vol)", format_large_number(day_vol, currency_symbol))
+            
+            st.divider()
 
-            # (B) 基本面
+            # (B) 基本面 (放在報價之後)
             if info:
                 st.subheader("📊 基本面健檢")
                 c1, c2, c3, c4 = st.columns(4)
@@ -219,7 +224,7 @@ if ticker_input:
                 st.divider()
 
             try:
-                # (C) AI 預測 & 儀表板
+                # (C) AI 預測
                 m, forecast = predict_stock(hist, forecast_days)
                 future_price = forecast['yhat'].iloc[-1]
 
@@ -234,7 +239,7 @@ if ticker_input:
                 fig.update_layout(xaxis_title=None, yaxis_title=currency, hovermode="x", height=500, margin=dict(l=20,r=20,t=40,b=20))
                 st.plotly_chart(fig, use_container_width=True)
 
-                # (E) 準確度回測
+                # (E) 回測
                 st.divider()
                 st.subheader("🕵️‍♂️ 模型真實準確度回測")
                 with st.expander(f"查看 {real_symbol} 近期預測準確度", expanded=True):
