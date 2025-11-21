@@ -5,12 +5,12 @@ import plotly.graph_objects as go
 from prophet import Prophet
 from prophet.plot import plot_plotly
 import numpy as np
-import requests  # 新增 requests 用於偽裝
+from datetime import datetime
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="AI 股市戰情室 v15.0", layout="wide")
-st.title("🤖 AI 股市戰情室 v15.0")
-st.caption("偽裝瀏覽器版：修復 NVDA 等熱門股被針對性封鎖的問題")
+st.set_page_config(page_title="AI 股市戰情室 v16.0", layout="wide")
+st.title("🤖 AI 股市戰情室 v16.0")
+st.caption("診斷版：移除偽裝 headers，新增自動降級與錯誤追蹤")
 
 # --- 2. 輸入與設定區 ---
 st.markdown("### 1️⃣ 選擇市場")
@@ -27,12 +27,12 @@ col_input, col_days = st.columns([2, 1])
 with col_input:
     if market_mode == "🇺🇸 美股 (US)":
         default_ticker = "NVDA"
-        label_text = "美股代碼 (如 NVDA, TSLA)"
+        label_text = "美股代碼"
         currency = "USD"
         currency_symbol = "$"
     else:
         default_ticker = "2330"
-        label_text = "台股代碼 (如 2330, 2603)"
+        label_text = "台股代碼"
         currency = "TWD"
         currency_symbol = "NT$"
         
@@ -41,89 +41,106 @@ with col_input:
 with col_days:
     forecast_days = st.selectbox("預測天數", [30, 60, 90, 180], index=1)
 
-# --- 3. 資料獲取函數 (新增 User-Agent 偽裝) ---
-@st.cache_data(ttl=300) # 設定 5 分鐘快取過期，避免快取中毒太久
+# --- 3. 資料獲取函數 (移除 Session，加入錯誤捕捉) ---
+@st.cache_data(ttl=60) # 縮短快取時間，方便測試
 def get_stock_data(ticker, market):
-    # 建立偽裝 Session
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    })
-
-    # A. 抓取歷史股價
-    try:
-        stock = None
-        if market == "🇹🇼 台股 (TW)":
-            if not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
-                test_ticker = f"{ticker}.TW"
-            else:
-                test_ticker = ticker
-            # 傳入 session 進行偽裝
-            stock = yf.Ticker(test_ticker, session=session)
-            hist = stock.history(period="5y", auto_adjust=True)
-            
-            if hist is None or hist.empty:
-                test_ticker = f"{ticker}.TWO"
-                stock = yf.Ticker(test_ticker, session=session)
-                hist = stock.history(period="5y", auto_adjust=True)
+    logs = [] # 錯誤日誌
+    
+    # 1. 決定代碼
+    target_tickers = []
+    if market == "🇹🇼 台股 (TW)":
+        if not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
+            target_tickers = [f"{ticker}.TW", f"{ticker}.TWO"]
         else:
-            stock = yf.Ticker(ticker, session=session)
-            hist = stock.history(period="5y", auto_adjust=True)
+            target_tickers = [ticker]
+    else:
+        target_tickers = [ticker]
 
-        if hist is None or hist.empty:
-            hist = stock.history(period="5y", auto_adjust=False)
-        
-        if hist is None or hist.empty:
-            return None, None, None, None
+    stock = None
+    hist = None
+    real_symbol = ticker
+    
+    # 2. 嘗試獲取數據
+    for t in target_tickers:
+        try:
+            temp_stock = yf.Ticker(t)
+            
+            # 策略 A: 嘗試抓完整 5 年 (auto_adjust=True)
+            try:
+                temp_hist = temp_stock.history(period="5y", auto_adjust=True)
+            except Exception as e:
+                logs.append(f"⚠️ {t} 5年數據獲取失敗: {e}")
+                temp_hist = None
 
-        hist.reset_index(inplace=True)
-        if 'Date' in hist.columns:
-             hist['Date'] = hist['Date'].dt.tz_localize(None)
-        
-        if stock is None:
-            stock = yf.Ticker(ticker, session=session)
+            # 策略 B: 如果 A 失敗，嘗試抓 1 個月 (測試是否僅長線被擋)
+            if temp_hist is None or temp_hist.empty:
+                logs.append(f"ℹ️ {t} 嘗試降級獲取 1 個月數據...")
+                temp_hist = temp_stock.history(period="1mo", auto_adjust=True)
 
-    except Exception:
-        return None, None, None, None
+            # 策略 C: 如果還是空，嘗試不自動調整
+            if temp_hist is None or temp_hist.empty:
+                temp_hist = temp_stock.history(period="1mo", auto_adjust=False)
 
-    # B. 抓取當日分時
+            # 檢查結果
+            if temp_hist is not None and not temp_hist.empty:
+                stock = temp_stock
+                hist = temp_hist
+                real_symbol = t
+                logs.append(f"✅ 成功獲取 {t} 數據 ({len(hist)} 筆)")
+                break # 成功就跳出迴圈
+            else:
+                logs.append(f"❌ {t} 最終回傳空值")
+                
+        except Exception as e:
+            logs.append(f"❌ {t} 初始化失敗: {e}")
+
+    if hist is None or hist.empty:
+        return None, None, None, None, logs
+
+    # 3. 數據整理
+    hist.reset_index(inplace=True)
+    if 'Date' in hist.columns:
+         hist['Date'] = hist['Date'].dt.tz_localize(None)
+
+    # 4. 抓取分時 (容錯)
+    intraday = None
     try:
         intraday = stock.history(period="1d", interval="5m", auto_adjust=True)
         if intraday is not None and not intraday.empty:
             intraday.reset_index(inplace=True)
             if 'Datetime' in intraday.columns:
                 intraday['Datetime'] = intraday['Datetime'].dt.tz_localize(None)
-        else:
-            intraday = None
-    except:
-        intraday = None
-    
-    # C. 抓取基本面 (使用 Fast Info 備援策略)
+    except Exception as e:
+        logs.append(f"⚠️ 分時數據跳過: {e}")
+
+    # 5. 抓取基本面 (Fast Info 優先)
     info = {}
     try:
-        info = stock.info
-        if info is None: info = {}
-    except:
-        info = {}
-    
-    try:
-        # 補救市值
-        if 'marketCap' not in info or info['marketCap'] is None:
-            fast = stock.fast_info
-            if hasattr(fast, 'market_cap') and fast.market_cap is not None:
-                info['marketCap'] = fast.market_cap
-            if 'fiftyTwoWeekHigh' not in info or info['fiftyTwoWeekHigh'] is None:
-                 if hasattr(fast, 'year_high') and fast.year_high is not None:
-                     info['fiftyTwoWeekHigh'] = fast.year_high
-    except:
-        pass
-    
-    real_symbol = stock.ticker 
-    return hist, info, real_symbol, intraday
+        # 優先嘗試 fast_info (較少被擋)
+        fast = stock.fast_info
+        if hasattr(fast, 'market_cap') and fast.market_cap is not None:
+            info['marketCap'] = fast.market_cap
+        if hasattr(fast, 'year_high') and fast.year_high is not None:
+            info['fiftyTwoWeekHigh'] = fast.year_high
+            
+        # 嘗試補全詳細 info
+        detailed_info = stock.info
+        if detailed_info:
+            # 只填補原本沒有的欄位
+            for k, v in detailed_info.items():
+                if k not in info:
+                    info[k] = v
+    except Exception as e:
+        logs.append(f"⚠️ 基本面部分獲取失敗: {e}")
 
+    return hist, info, real_symbol, intraday, logs
 
 # --- 4. AI 預測函數 ---
 def predict_stock(data, days):
+    # 如果數據太少 (例如降級到 1mo)，預測天數也要調整
+    if len(data) < 30:
+        return None, None # 數據不足不預測
+
     df_train = data[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
     m = Prophet(daily_seasonality=False, changepoint_prior_scale=0.5)
     m.fit(df_train)
@@ -135,6 +152,8 @@ def predict_stock(data, days):
 
 # --- 5. 回測函數 ---
 def backtest_model(data, test_days=5):
+    if len(data) < 30: return 0, pd.DataFrame() # 數據不足不回測
+    
     df_full = data[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
     train_df = df_full.iloc[:-test_days]
     test_df = df_full.iloc[-test_days:].copy()
@@ -148,7 +167,7 @@ def backtest_model(data, test_days=5):
     acc_score = 100 - result['error_pct'].mean()
     return acc_score, result
 
-# --- 6. 繪圖與格式化函數 ---
+# --- 6. 繪圖與格式化 ---
 def plot_gauge(current, future, c_symbol):
     raw_change_pct = ((future - current) / current) * 100
     change_pct = round(raw_change_pct, 3)
@@ -215,22 +234,32 @@ if ticker_input:
     ticker_clean = ticker_input.upper().strip()
     
     with st.spinner(f'AI 正在搜尋 {market_mode} 數據...'):
-        hist, info, real_symbol, intraday = get_stock_data(ticker_clean, market_mode)
+        hist, info, real_symbol, intraday, logs = get_stock_data(ticker_clean, market_mode)
 
         if hist is None or hist.empty:
             st.error(f"❌ 找不到代碼 '{ticker_clean}'")
+            
+            # 【偵錯專用】顯示詳細錯誤日誌
+            with st.expander("查看詳細錯誤日誌 (Debug info)", expanded=True):
+                for log in logs:
+                    st.text(log)
+            
             if market_mode == "🇹🇼 台股 (TW)":
                 st.info("💡 提示：台股請輸入數字代碼，如 2330 (台積電), 2603 (長榮)。")
-            
-            # 【提示使用者清除快取】
-            st.warning("⚠️ 如果您確定代碼正確但仍顯示找不到，請嘗試右下角選單 'Clear cache' 並重啟 App，因為 NVDA 可能因為太熱門被暫時限流。")
         else:
-            # (A) 全能資訊卡 (HTML)
+            # (A) 全能資訊卡
             last_row = hist.iloc[-1]
             current_price = last_row['Close']
-            prev_price = hist.iloc[-2]['Close']
-            delta = current_price - prev_price
-            pct = (delta / prev_price) * 100
+            
+            # 防呆：如果資料不足 2 筆 (例如剛上市或降級只抓到 1 天)，不做漲跌計算
+            if len(hist) >= 2:
+                prev_price = hist.iloc[-2]['Close']
+                delta = current_price - prev_price
+                pct = (delta / prev_price) * 100
+            else:
+                delta = 0
+                pct = 0
+                
             color = "#00CC96" if delta >= 0 else "#FF4B4B"
             
             day_open = last_row['Open']
@@ -281,33 +310,36 @@ if ticker_input:
             st.divider()
 
             try:
-                # (C) AI 預測
+                # (C) AI 預測 (防呆：數據太少不預測)
                 m, forecast = predict_stock(hist, forecast_days)
-                future_price = forecast['yhat'].iloc[-1]
+                
+                if m is not None:
+                    future_price = forecast['yhat'].iloc[-1]
+                    st.subheader("🧭 AI 建議光譜")
+                    gauge, chg_pct = plot_gauge(current_price, future_price, currency_symbol)
+                    st.plotly_chart(gauge, use_container_width=True)
+                    st.info(get_ai_explanation(real_symbol, forecast_days, chg_pct))
 
-                st.subheader("🧭 AI 建議光譜")
-                gauge, chg_pct = plot_gauge(current_price, future_price, currency_symbol)
-                st.plotly_chart(gauge, use_container_width=True)
-                st.info(get_ai_explanation(real_symbol, forecast_days, chg_pct))
-
-                # (D) 走勢圖
-                st.subheader("📈 詳細走勢預測")
-                fig = plot_plotly(m, forecast)
-                fig.update_layout(xaxis_title=None, yaxis_title=currency, hovermode="x", height=500, margin=dict(l=20,r=20,t=40,b=20))
-                st.plotly_chart(fig, use_container_width=True)
-
-                # (E) 回測
-                st.divider()
-                st.subheader("🕵️‍♂️ 模型真實準確度回測")
-                with st.expander(f"查看 {real_symbol} 近期預測準確度", expanded=True):
-                    acc, bt_df = backtest_model(hist)
-                    score_color = "green" if acc >= 90 else "orange" if acc >= 80 else "red"
-                    st.markdown(f"<h3 style='text-align:center'>近期評分: <span style='color:{score_color}'>{acc:.1f} 分</span></h3>", unsafe_allow_html=True)
+                    st.subheader("📈 詳細走勢預測")
+                    fig = plot_plotly(m, forecast)
+                    fig.update_layout(xaxis_title=None, yaxis_title=currency, hovermode="x", height=500, margin=dict(l=20,r=20,t=40,b=20))
+                    st.plotly_chart(fig, use_container_width=True)
                     
-                    bt_display = bt_df[['ds', 'y', 'yhat', 'error_pct']].copy()
-                    bt_display.columns = ['日期', '真實價', '預測價', '誤差%']
-                    bt_display['日期'] = bt_display['日期'].dt.strftime('%m-%d')
-                    st.dataframe(bt_display.style.format({'真實價': '{:.2f}', '預測價': '{:.2f}', '誤差%': '{:.2f}%'}), use_container_width=True)
+                    st.divider()
+                    st.subheader("🕵️‍♂️ 模型真實準確度回測")
+                    with st.expander(f"查看 {real_symbol} 近期預測準確度", expanded=True):
+                        acc, bt_df = backtest_model(hist)
+                        if acc > 0:
+                            score_color = "green" if acc >= 90 else "orange" if acc >= 80 else "red"
+                            st.markdown(f"<h3 style='text-align:center'>近期評分: <span style='color:{score_color}'>{acc:.1f} 分</span></h3>", unsafe_allow_html=True)
+                            bt_display = bt_df[['ds', 'y', 'yhat', 'error_pct']].copy()
+                            bt_display.columns = ['日期', '真實價', '預測價', '誤差%']
+                            bt_display['日期'] = bt_display['日期'].dt.strftime('%m-%d')
+                            st.dataframe(bt_display.style.format({'真實價': '{:.2f}', '預測價': '{:.2f}', '誤差%': '{:.2f}%'}), use_container_width=True)
+                        else:
+                            st.warning("數據不足，無法進行回測")
+                else:
+                    st.warning("⚠️ 歷史數據不足 30 筆，無法進行 AI 預測。")
 
             except Exception as e:
                 st.error(f"分析失敗: {e}")
