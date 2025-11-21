@@ -5,12 +5,12 @@ import plotly.graph_objects as go
 from prophet import Prophet
 from prophet.plot import plot_plotly
 import numpy as np
-from datetime import datetime
+import requests  # 新增 requests 用於偽裝
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="AI 股市戰情室 v14.0", layout="wide")
-st.title("🤖 AI 股市戰情室 v14.0")
-st.caption("修復版：引入 Fast Info 快速通道，解決基本面 N/A 問題")
+st.set_page_config(page_title="AI 股市戰情室 v15.0", layout="wide")
+st.title("🤖 AI 股市戰情室 v15.0")
+st.caption("偽裝瀏覽器版：修復 NVDA 等熱門股被針對性封鎖的問題")
 
 # --- 2. 輸入與設定區 ---
 st.markdown("### 1️⃣ 選擇市場")
@@ -41,10 +41,16 @@ with col_input:
 with col_days:
     forecast_days = st.selectbox("預測天數", [30, 60, 90, 180], index=1)
 
-# --- 3. 資料獲取函數 (新增 Fast Info 備援) ---
-@st.cache_data
+# --- 3. 資料獲取函數 (新增 User-Agent 偽裝) ---
+@st.cache_data(ttl=300) # 設定 5 分鐘快取過期，避免快取中毒太久
 def get_stock_data(ticker, market):
-    # A. 抓取歷史股價 (核心數據)
+    # 建立偽裝 Session
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+
+    # A. 抓取歷史股價
     try:
         stock = None
         if market == "🇹🇼 台股 (TW)":
@@ -52,15 +58,16 @@ def get_stock_data(ticker, market):
                 test_ticker = f"{ticker}.TW"
             else:
                 test_ticker = ticker
-            stock = yf.Ticker(test_ticker)
+            # 傳入 session 進行偽裝
+            stock = yf.Ticker(test_ticker, session=session)
             hist = stock.history(period="5y", auto_adjust=True)
             
             if hist is None or hist.empty:
                 test_ticker = f"{ticker}.TWO"
-                stock = yf.Ticker(test_ticker)
+                stock = yf.Ticker(test_ticker, session=session)
                 hist = stock.history(period="5y", auto_adjust=True)
         else:
-            stock = yf.Ticker(ticker)
+            stock = yf.Ticker(ticker, session=session)
             hist = stock.history(period="5y", auto_adjust=True)
 
         if hist is None or hist.empty:
@@ -73,14 +80,13 @@ def get_stock_data(ticker, market):
         if 'Date' in hist.columns:
              hist['Date'] = hist['Date'].dt.tz_localize(None)
         
-        # 確保 stock 物件存在
         if stock is None:
-            stock = yf.Ticker(ticker)
+            stock = yf.Ticker(ticker, session=session)
 
     except Exception:
         return None, None, None, None
 
-    # B. 抓取當日分時 (容錯)
+    # B. 抓取當日分時
     try:
         intraday = stock.history(period="1d", interval="5m", auto_adjust=True)
         if intraday is not None and not intraday.empty:
@@ -92,31 +98,25 @@ def get_stock_data(ticker, market):
     except:
         intraday = None
     
-    # C. 抓取基本面 (策略：Info 優先 -> Fast Info 備援)
+    # C. 抓取基本面 (使用 Fast Info 備援策略)
     info = {}
-    
-    # 1. 嘗試抓取詳細 info
     try:
         info = stock.info
         if info is None: info = {}
     except:
         info = {}
     
-    # 2. 【關鍵修復】如果 info 抓失敗或是缺市值的 key，改用 fast_info 補救
-    # fast_info 使用不同的通道，較不容易被擋
     try:
+        # 補救市值
         if 'marketCap' not in info or info['marketCap'] is None:
             fast = stock.fast_info
-            # 檢查 fast_info 是否有市值資料
             if hasattr(fast, 'market_cap') and fast.market_cap is not None:
                 info['marketCap'] = fast.market_cap
-            
-            # 也可以順便補救 52週高 (如果 info 沒抓到)
             if 'fiftyTwoWeekHigh' not in info or info['fiftyTwoWeekHigh'] is None:
                  if hasattr(fast, 'year_high') and fast.year_high is not None:
                      info['fiftyTwoWeekHigh'] = fast.year_high
     except:
-        pass # 如果連 fast_info 都失敗，那就真的沒轍了
+        pass
     
     real_symbol = stock.ticker 
     return hist, info, real_symbol, intraday
@@ -221,8 +221,11 @@ if ticker_input:
             st.error(f"❌ 找不到代碼 '{ticker_clean}'")
             if market_mode == "🇹🇼 台股 (TW)":
                 st.info("💡 提示：台股請輸入數字代碼，如 2330 (台積電), 2603 (長榮)。")
+            
+            # 【提示使用者清除快取】
+            st.warning("⚠️ 如果您確定代碼正確但仍顯示找不到，請嘗試右下角選單 'Clear cache' 並重啟 App，因為 NVDA 可能因為太熱門被暫時限流。")
         else:
-            # (A) 全能資訊卡 (HTML 修復版)
+            # (A) 全能資訊卡 (HTML)
             last_row = hist.iloc[-1]
             current_price = last_row['Close']
             prev_price = hist.iloc[-2]['Close']
@@ -235,13 +238,11 @@ if ticker_input:
             day_low = last_row['Low']
             day_vol = format_large_number(last_row['Volume'], currency_symbol)
             
-            # 這裡使用 .get 並給予預設值，避免 N/A 太難看
             mkt_cap = format_large_number(info.get('marketCap'), currency_symbol)
             pe_ratio = f"{info.get('trailingPE', 'N/A')}"
             eps = f"{info.get('trailingEps', 'N/A')}"
             high_52 = f"{info.get('fiftyTwoWeekHigh', 'N/A')}"
 
-            # 使用 f-string 且完全靠左
             card_html = f"""
 <div style="background-color: #1e212b; border-radius: 15px; padding: 20px; border: 1px solid #444; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
 <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 15px;">
