@@ -8,9 +8,9 @@ import numpy as np
 from datetime import datetime
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="AI 股市戰情室 v16.0", layout="wide")
-st.title("🤖 AI 股市戰情室 v16.0")
-st.caption("診斷版：移除偽裝 headers，新增自動降級與錯誤追蹤")
+st.set_page_config(page_title="AI 股市戰情室 v17.0", layout="wide")
+st.title("🤖 AI 股市戰情室 v17.0")
+st.caption("修復版：調整降級策略 (1mo -> 6mo)，解決數據不足導致 AI 罷工的問題")
 
 # --- 2. 輸入與設定區 ---
 st.markdown("### 1️⃣ 選擇市場")
@@ -41,12 +41,11 @@ with col_input:
 with col_days:
     forecast_days = st.selectbox("預測天數", [30, 60, 90, 180], index=1)
 
-# --- 3. 資料獲取函數 (移除 Session，加入錯誤捕捉) ---
-@st.cache_data(ttl=60) # 縮短快取時間，方便測試
+# --- 3. 資料獲取函數 (修正策略) ---
+@st.cache_data(ttl=60)
 def get_stock_data(ticker, market):
-    logs = [] # 錯誤日誌
+    logs = []
     
-    # 1. 決定代碼
     target_tickers = []
     if market == "🇹🇼 台股 (TW)":
         if not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
@@ -60,34 +59,32 @@ def get_stock_data(ticker, market):
     hist = None
     real_symbol = ticker
     
-    # 2. 嘗試獲取數據
     for t in target_tickers:
         try:
             temp_stock = yf.Ticker(t)
             
-            # 策略 A: 嘗試抓完整 5 年 (auto_adjust=True)
+            # 策略 A: 嘗試抓完整 5 年
             try:
                 temp_hist = temp_stock.history(period="5y", auto_adjust=True)
             except Exception as e:
                 logs.append(f"⚠️ {t} 5年數據獲取失敗: {e}")
                 temp_hist = None
 
-            # 策略 B: 如果 A 失敗，嘗試抓 1 個月 (測試是否僅長線被擋)
+            # 策略 B: 【修正重點】如果 A 失敗，改抓 "6個月" (約 120筆 > 30筆)
             if temp_hist is None or temp_hist.empty:
-                logs.append(f"ℹ️ {t} 嘗試降級獲取 1 個月數據...")
-                temp_hist = temp_stock.history(period="1mo", auto_adjust=True)
+                logs.append(f"ℹ️ {t} 嘗試降級獲取 6 個月數據...")
+                temp_hist = temp_stock.history(period="6mo", auto_adjust=True)
 
-            # 策略 C: 如果還是空，嘗試不自動調整
+            # 策略 C: 最後手段，抓原始數據
             if temp_hist is None or temp_hist.empty:
-                temp_hist = temp_stock.history(period="1mo", auto_adjust=False)
+                temp_hist = temp_stock.history(period="6mo", auto_adjust=False)
 
-            # 檢查結果
             if temp_hist is not None and not temp_hist.empty:
                 stock = temp_stock
                 hist = temp_hist
                 real_symbol = t
                 logs.append(f"✅ 成功獲取 {t} 數據 ({len(hist)} 筆)")
-                break # 成功就跳出迴圈
+                break
             else:
                 logs.append(f"❌ {t} 最終回傳空值")
                 
@@ -97,12 +94,11 @@ def get_stock_data(ticker, market):
     if hist is None or hist.empty:
         return None, None, None, None, logs
 
-    # 3. 數據整理
     hist.reset_index(inplace=True)
     if 'Date' in hist.columns:
          hist['Date'] = hist['Date'].dt.tz_localize(None)
 
-    # 4. 抓取分時 (容錯)
+    # 分時數據
     intraday = None
     try:
         intraday = stock.history(period="1d", interval="5m", auto_adjust=True)
@@ -110,36 +106,36 @@ def get_stock_data(ticker, market):
             intraday.reset_index(inplace=True)
             if 'Datetime' in intraday.columns:
                 intraday['Datetime'] = intraday['Datetime'].dt.tz_localize(None)
-    except Exception as e:
-        logs.append(f"⚠️ 分時數據跳過: {e}")
+    except:
+        pass
 
-    # 5. 抓取基本面 (Fast Info 優先)
+    # 基本面 (Fast Info)
     info = {}
     try:
-        # 優先嘗試 fast_info (較少被擋)
         fast = stock.fast_info
         if hasattr(fast, 'market_cap') and fast.market_cap is not None:
             info['marketCap'] = fast.market_cap
         if hasattr(fast, 'year_high') and fast.year_high is not None:
             info['fiftyTwoWeekHigh'] = fast.year_high
-            
-        # 嘗試補全詳細 info
-        detailed_info = stock.info
-        if detailed_info:
-            # 只填補原本沒有的欄位
-            for k, v in detailed_info.items():
-                if k not in info:
-                    info[k] = v
-    except Exception as e:
-        logs.append(f"⚠️ 基本面部分獲取失敗: {e}")
+        
+        # 嘗試補全
+        try:
+            detailed = stock.info
+            if detailed:
+                for k, v in detailed.items():
+                    if k not in info: info[k] = v
+        except:
+            pass
+    except:
+        pass
 
     return hist, info, real_symbol, intraday, logs
 
 # --- 4. AI 預測函數 ---
 def predict_stock(data, days):
-    # 如果數據太少 (例如降級到 1mo)，預測天數也要調整
-    if len(data) < 30:
-        return None, None # 數據不足不預測
+    # 【修正重點】放寬限制，只要有 20 筆就願意預測 (雖然準度會下降，但至少有圖看)
+    if len(data) < 20:
+        return None, None
 
     df_train = data[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
     m = Prophet(daily_seasonality=False, changepoint_prior_scale=0.5)
@@ -152,7 +148,8 @@ def predict_stock(data, days):
 
 # --- 5. 回測函數 ---
 def backtest_model(data, test_days=5):
-    if len(data) < 30: return 0, pd.DataFrame() # 數據不足不回測
+    # 【修正重點】放寬回測限制
+    if len(data) < 20: return 0, pd.DataFrame()
     
     df_full = data[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
     train_df = df_full.iloc[:-test_days]
@@ -238,12 +235,9 @@ if ticker_input:
 
         if hist is None or hist.empty:
             st.error(f"❌ 找不到代碼 '{ticker_clean}'")
-            
-            # 【偵錯專用】顯示詳細錯誤日誌
             with st.expander("查看詳細錯誤日誌 (Debug info)", expanded=True):
                 for log in logs:
                     st.text(log)
-            
             if market_mode == "🇹🇼 台股 (TW)":
                 st.info("💡 提示：台股請輸入數字代碼，如 2330 (台積電), 2603 (長榮)。")
         else:
@@ -251,7 +245,6 @@ if ticker_input:
             last_row = hist.iloc[-1]
             current_price = last_row['Close']
             
-            # 防呆：如果資料不足 2 筆 (例如剛上市或降級只抓到 1 天)，不做漲跌計算
             if len(hist) >= 2:
                 prev_price = hist.iloc[-2]['Close']
                 delta = current_price - prev_price
@@ -271,6 +264,9 @@ if ticker_input:
             pe_ratio = f"{info.get('trailingPE', 'N/A')}"
             eps = f"{info.get('trailingEps', 'N/A')}"
             high_52 = f"{info.get('fiftyTwoWeekHigh', 'N/A')}"
+            
+            # 顯示實際抓到的數據筆數，方便 Debug
+            st.caption(f"📊 已獲取歷史數據: {len(hist)} 筆 (用於 AI 訓練)")
 
             card_html = f"""
 <div style="background-color: #1e212b; border-radius: 15px; padding: 20px; border: 1px solid #444; margin-bottom: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
@@ -300,7 +296,6 @@ if ticker_input:
 """
             st.markdown(card_html, unsafe_allow_html=True)
 
-            # (B) 走勢圖
             if intraday is not None and not intraday.empty:
                 intraday_chart = plot_intraday(intraday, real_symbol, currency_symbol)
                 st.plotly_chart(intraday_chart, use_container_width=True)
@@ -310,7 +305,7 @@ if ticker_input:
             st.divider()
 
             try:
-                # (C) AI 預測 (防呆：數據太少不預測)
+                # (C) AI 預測
                 m, forecast = predict_stock(hist, forecast_days)
                 
                 if m is not None:
@@ -339,7 +334,7 @@ if ticker_input:
                         else:
                             st.warning("數據不足，無法進行回測")
                 else:
-                    st.warning("⚠️ 歷史數據不足 30 筆，無法進行 AI 預測。")
+                    st.warning(f"⚠️ 歷史數據不足 20 筆 (目前: {len(hist)} 筆)，AI 暫停預測以避免失準。")
 
             except Exception as e:
                 st.error(f"分析失敗: {e}")
